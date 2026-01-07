@@ -77,10 +77,9 @@ function App() {
   }
 
   // 選択した日付の目標を取得
-  const getGoalsForDate = (date: Date): Goals => {
+  const getGoalsForDate = (date: Date, goals: GoalsByDate): Goals => {
     const dateKey = getDateKey(date)
-    const goalsByDate = loadGoalsFromStorage()
-    return goalsByDate[dateKey] || createDefaultGoals()
+    return goals[dateKey] || createDefaultGoals()
   }
 
   const [tasks, setTasks] = useState<Task[]>(loadTasksFromStorage)
@@ -122,7 +121,7 @@ function App() {
   }, [goalsByDate])
 
   // 選択した日付の目標を取得
-  const currentGoals = getGoalsForDate(selectedDate)
+  const currentGoals = getGoalsForDate(selectedDate, goalsByDate)
 
   // 曜日ごとの背景色を取得
   const getDayBackgroundColor = (date: Date): string => {
@@ -242,9 +241,12 @@ function App() {
         totalTime: 0,
         sessions: [],
         color: selectedColor,
-        order: tasks.length
+        order: 0
       }
-      setTasks([...tasks, newTask])
+      setTasks(prevTasks => [
+        newTask,
+        ...prevTasks.map(task => ({ ...task, order: task.order + 1 }))
+      ])
       setNewTaskName('')
     }
   }
@@ -1186,9 +1188,11 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                         ×
                       </button>
                       <div className="task-name">{task.name}</div>
-                      <div className="task-time">
-                        {selectedDate.toDateString() === new Date().toDateString() ? '本日' : getDateString(selectedDate)}: {formatTime(dateTime)}
-                      </div>
+                      {dateTime > 0 && (
+                        <div className="task-time">
+                          {selectedDate.toDateString() === new Date().toDateString() ? '本日' : getDateString(selectedDate)}: {formatTime(dateTime)}
+                        </div>
+                      )}
                       <div className="task-status">
                         {isActive ? '⏸ 停止' : '▶ 開始'}
                       </div>
