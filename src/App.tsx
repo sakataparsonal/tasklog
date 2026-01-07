@@ -32,6 +32,7 @@ const TASK_COLORS = [
 
 const STORAGE_KEY = 'tasklog-tasks'
 const GOALS_STORAGE_KEY = 'tasklog-goals'
+const TASKS_DATE_KEY = 'tasklog-tasks-date' // タスクリストの日付を保存
 
 // 日付をキーに変換（YYYY-MM-DD形式）
 const getDateKey = (date: Date): string => {
@@ -46,6 +47,16 @@ function App() {
   const loadTasksFromStorage = (): Task[] => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY)
+      const tasksDate = localStorage.getItem(TASKS_DATE_KEY)
+      const todayKey = getDateKey(new Date())
+      
+      // 保存された日付が今日でない場合は、タスクリストをクリア
+      if (tasksDate !== todayKey && stored) {
+        localStorage.removeItem(STORAGE_KEY)
+        localStorage.removeItem(TASKS_DATE_KEY)
+        return []
+      }
+      
       if (stored) {
         return JSON.parse(stored)
       }
@@ -105,11 +116,26 @@ function App() {
   // タスクをローカルストレージに保存
   useEffect(() => {
     try {
+      const todayKey = getDateKey(new Date())
       localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+      localStorage.setItem(TASKS_DATE_KEY, todayKey)
     } catch (error) {
       console.error('Failed to save tasks to storage:', error)
     }
   }, [tasks])
+  
+  // 日付が変わったときにタスクリストをクリア
+  useEffect(() => {
+    const todayKey = getDateKey(new Date())
+    const storedDate = localStorage.getItem(TASKS_DATE_KEY)
+    
+    // 保存された日付が今日でない場合は、タスクリストをクリア
+    if (storedDate && storedDate !== todayKey) {
+      setTasks([])
+      setActiveTaskId(null)
+      startTimeRef.current = null
+    }
+  }, [])
 
   // 目標をローカルストレージに保存
   useEffect(() => {
@@ -527,21 +553,23 @@ ${currentGoals.quadrant2.map((goal, idx) => {
 
   // 本日のデータをリセット
   const handleResetToday = () => {
-    if (window.confirm('本日のデータをリセットしますか？この操作は取り消せません。')) {
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
-      const todayStart = today.getTime()
+    if (window.confirm('選択した日付の実行時間をすべてクリアしますか？')) {
+      const selectedDateStart = new Date(selectedDate)
+      selectedDateStart.setHours(0, 0, 0, 0)
+      const selectedDateStartTime = selectedDateStart.getTime()
       
       setTasks(tasks.map(task => {
-        // 本日のセッションを除外
+        // 選択した日付のセッションを除外
         const filteredSessions = task.sessions.filter(session => {
           if (session.end) {
-            return session.end < todayStart
+            return session.end < selectedDateStartTime
           }
-          return session.start < todayStart || activeTaskId !== task.id
+          // 実行中のセッションは今日のみ
+          const isToday = selectedDate.toDateString() === new Date().toDateString()
+          return session.start < selectedDateStartTime || !isToday || activeTaskId !== task.id
         })
         
-        // 本日の時間を再計算
+        // 時間を再計算
         const remainingTime = filteredSessions.reduce((sum, session) => {
           if (session.end) {
             return sum + (session.end - session.start)
@@ -562,7 +590,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
         startTimeRef.current = null
       }
       
-      alert('本日のデータをリセットしました。')
+      alert('選択した日付のデータをリセットしました。')
     }
   }
 
