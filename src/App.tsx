@@ -124,6 +124,23 @@ function App() {
   // 選択した日付の目標を取得
   const currentGoals = getGoalsForDate(selectedDate)
 
+  // 曜日ごとの背景色を取得
+  const getDayBackgroundColor = (date: Date): string => {
+    const day = date.getDay()
+    const colors = [
+      '#fff5f5', // 日曜日: 薄い赤
+      '#f0f4ff', // 月曜日: 薄い青
+      '#fff8e1', // 火曜日: 薄いオレンジ
+      '#f1f8e9', // 水曜日: 薄い緑
+      '#fffde7', // 木曜日: 薄い黄
+      '#f3e5f5', // 金曜日: 薄い紫
+      '#fce4ec'  // 土曜日: 薄いピンク
+    ]
+    return colors[day]
+  }
+
+  const dayBackgroundColor = getDayBackgroundColor(selectedDate)
+
   // ストップウォッチの更新（UI更新用）
   useEffect(() => {
     if (activeTaskId && startTimeRef.current) {
@@ -929,7 +946,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
   }
 
   return (
-    <div className="app">
+    <div className="app" style={{ backgroundColor: dayBackgroundColor, minHeight: '100vh' }}>
       <div className="container">
         <div className="header-section">
           <h1>TaskLog</h1>
