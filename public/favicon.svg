@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="20" fill="url(#grad)"/>
+  <!-- 時計の外枠 -->
+  <circle cx="50" cy="50" r="35" fill="none" stroke="white" stroke-width="4"/>
+  <!-- 時計の文字盤の目盛り -->
+  <line x1="50" y1="20" x2="50" y2="25" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  <line x1="50" y1="75" x2="50" y2="80" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  <line x1="20" y1="50" x2="25" y2="50" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  <line x1="75" y1="50" x2="80" y2="50" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  <!-- 短針（時針） -->
+  <line x1="50" y1="50" x2="50" y2="40" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  <!-- 長針（分針） -->
+  <line x1="50" y1="50" x2="50" y2="25" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- 中心点 -->
+  <circle cx="50" cy="50" r="3" fill="white"/>
+</svg>
