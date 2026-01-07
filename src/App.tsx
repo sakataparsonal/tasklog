@@ -989,7 +989,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
           <div className="goals-header">
             <h2>最重要目標</h2>
             <button onClick={handleCopyPreviousDayGoals} className="copy-previous-goals-button">
-              前日の目標をコピー
+              前日の目標を複写する
             </button>
           </div>
           <div className="goals-container">
@@ -1062,6 +1062,11 @@ ${currentGoals.quadrant2.map((goal, idx) => {
               ))}
             </div>
           </div>
+          <div className="goals-copy-section">
+            <button onClick={handleCopyGoals} className="goals-button-small">
+              最重要目標をクリップボードにコピー
+            </button>
+          </div>
         </div>
 
         {/* ポモドーロタイマー */}
@@ -1077,7 +1082,11 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 {isPomodoroRunning ? '⏸' : '▶'}
               </button>
               <button onClick={handlePomodoroReset} className="pomodoro-reset-button">
-                🔄
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M1 4V10H7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M23 20V14H17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14L18.36 18.36A9 9 0 0 1 3.51 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
               </button>
             </div>
           </div>
@@ -1188,11 +1197,48 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 })}
               </div>
             )}
+            
+            {/* Googleカレンダー連携 */}
+            <div className="calendar-section">
+              <h2>Googleカレンダー連携</h2>
+              {!isGoogleCalendarConnected ? (
+                <div>
+              <button onClick={handleGoogleCalendarAuth} className="calendar-connect-button">
+                Googleカレンダーからタスクを取得
+              </button>
+                </div>
+              ) : (
+                <div className="calendar-connected">
+                  <span className="calendar-status">✓ 連携済み</span>
+                  <button 
+                    onClick={fetchTasksFromGoogleCalendar} 
+                    className="calendar-fetch-button"
+                  >
+                    タスクを取得
+                  </button>
+                  <button 
+                    onClick={() => {
+                      localStorage.removeItem('google_access_token')
+                      setIsGoogleCalendarConnected(false)
+                      alert('連携を解除しました。')
+                    }} 
+                    className="calendar-disconnect-button"
+                  >
+                    連携解除
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 実行時間カラム（時間軸） */}
           <div className="timeline-section">
-            <h2>実行時間</h2>
+            <div className="timeline-header">
+              <h2>実行時間</h2>
+              <button onClick={handleResetToday} className="timeline-clear-button">
+                クリア
+              </button>
+            </div>
             {tasks.length === 0 ? (
               <p className="no-tasks">タスクがありません。</p>
             ) : (
@@ -1274,52 +1320,14 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 )
               })()
             )}
+            
+            {/* 実績時間をクリップボードにコピー */}
+            <div className="timeline-copy-section">
+              <button onClick={handleCopyReport} className="report-button">
+                実績をクリップボードにコピー
+              </button>
+            </div>
           </div>
-        </div>
-
-        {/* Googleカレンダー連携 */}
-        <div className="calendar-section">
-          <h2>Googleカレンダー連携</h2>
-          {!isGoogleCalendarConnected ? (
-            <div>
-              <button onClick={handleGoogleCalendarAuth} className="calendar-connect-button">
-                Googleカレンダーと連携
-              </button>
-              <p className="calendar-help">
-                初回のみ認証が必要です。.envファイルにVITE_GOOGLE_CLIENT_IDを設定してください。
-              </p>
-            </div>
-          ) : (
-            <div className="calendar-connected">
-              <span className="calendar-status">✓ 連携中</span>
-              <button onClick={fetchTasksFromGoogleCalendar} className="calendar-sync-button">
-                タスクを取得
-              </button>
-              <button 
-                onClick={() => {
-                  localStorage.removeItem('google_access_token')
-                  setIsGoogleCalendarConnected(false)
-                  alert('連携を解除しました。')
-                }} 
-                className="calendar-disconnect-button"
-              >
-                連携解除
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* 報告ボタンとリセットボタン */}
-        <div className="report-section">
-          <button onClick={handleCopyGoals} className="goals-button">
-            最重要目標をコピー
-          </button>
-          <button onClick={handleCopyReport} className="report-button">
-            1日の実績時間をコピー
-          </button>
-          <button onClick={handleResetToday} className="reset-button">
-            本日をリセット
-          </button>
         </div>
       </div>
     </div>
