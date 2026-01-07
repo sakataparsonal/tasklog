@@ -738,8 +738,16 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       isActive: boolean
     }> = []
     
+    // 実行中のセッションを追跡（各タスクにつき1つだけ）
+    const activeSessionByTask = new Map<string, { taskId: string; sessionIndex: number; start: number }>()
+    
     tasks.forEach(task => {
       task.sessions.forEach((session, sessionIndex) => {
+        // session.startが正しく設定されていることを確認
+        if (!session.start || session.start <= 0) {
+          return // 不正なstart値のセッションはスキップ
+        }
+        
         if (session.end) {
           // 終了済みセッション
           if (session.end >= selectedDateStartTime && session.start <= selectedDateEndTime) {
@@ -754,22 +762,43 @@ ${currentGoals.quadrant2.map((goal, idx) => {
             })
           }
         } else if (isToday && activeTaskId === task.id && session.start >= selectedDateStartTime) {
-          // 実行中のセッション（今日のみ）- 編集・削除不可
-          allSessions.push({
-            taskId: task.id,
-            sessionIndex,
-            taskName: task.name,
-            taskColor: task.color || TASK_COLORS[0],
-            start: session.start,
-            end: Date.now(),
-            isActive: true
-          })
+          // 実行中のセッション（今日のみ）- 各タスクにつき最新の1つだけを追加
+          const existing = activeSessionByTask.get(task.id)
+          if (!existing || session.start > existing.start) {
+            activeSessionByTask.set(task.id, { taskId: task.id, sessionIndex, start: session.start })
+          }
         }
       })
     })
     
-    // 開始時刻でソート
-    allSessions.sort((a, b) => a.start - b.start)
+    // 実行中のセッションを追加（各タスクにつき1つだけ）
+    activeSessionByTask.forEach((activeSession, taskId) => {
+      const task = tasks.find(t => t.id === taskId)
+      if (task) {
+        allSessions.push({
+          taskId: task.id,
+          sessionIndex: activeSession.sessionIndex,
+          taskName: task.name,
+          taskColor: task.color || TASK_COLORS[0],
+          start: activeSession.start,
+          end: Date.now(),
+          isActive: true
+        })
+      }
+    })
+    
+    // 開始時刻でソート（実行中のタスクも含めて時系列順に）
+    allSessions.sort((a, b) => {
+      // 開始時刻でソート（数値として比較）
+      const startDiff = a.start - b.start
+      if (startDiff !== 0) {
+        return startDiff
+      }
+      // 開始時刻が同じ場合は、実行中のタスクを後ろに
+      if (a.isActive && !b.isActive) return 1
+      if (!a.isActive && b.isActive) return -1
+      return 0
+    })
     
     return allSessions
   }
@@ -1320,17 +1349,16 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                         </div>
                       )
                     })}
+                    {/* 実績時間をクリップボードにコピー */}
+                    <div className="timeline-copy-section">
+                      <button onClick={handleCopyReport} className="report-button">
+                        実績をクリップボードにコピー
+                      </button>
+                    </div>
                   </div>
                 )
               })()
             )}
-            
-            {/* 実績時間をクリップボードにコピー */}
-            <div className="timeline-copy-section">
-              <button onClick={handleCopyReport} className="report-button">
-                実績をクリップボードにコピー
-              </button>
-            </div>
           </div>
         </div>
       </div>

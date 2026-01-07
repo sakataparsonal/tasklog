@@ -566,6 +566,7 @@ h2 {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 15px;
+  flex-shrink: 0;
 }
 
 .timeline-header h2 {
@@ -826,9 +827,11 @@ h2 {
 }
 
 .timeline-copy-section {
-  margin-top: 40px;
+  margin-top: 15px;
+  margin-bottom: 10px;
   display: flex;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .goals-copy-section {
