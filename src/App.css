@@ -44,6 +44,8 @@ h1 {
   display: flex;
   align-items: center;
   gap: 20px;
+  width: 100%;
+  justify-content: center;
 }
 
 .date-nav-button {
@@ -637,6 +639,7 @@ h2 {
   font-weight: 600;
   color: #333;
   flex: 1;
+  padding: 0 8px;
 }
 
 .timeline-duration {
@@ -935,11 +938,20 @@ h2 {
   }
 
   .task-list {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
   }
 
   .add-task-input-row {
-    flex-direction: column;
+    flex-direction: row;
+    gap: 8px;
+  }
+
+  .task-input {
+    flex: 1;
+  }
+
+  .add-button {
+    flex-shrink: 0;
   }
 
   .timeline-item {
@@ -970,6 +982,16 @@ h2 {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+    position: relative;
+  }
+
+  .task-delete-button {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    width: 22px;
+    height: 22px;
+    z-index: 10;
   }
 
   .task-status {
@@ -1008,14 +1030,49 @@ h2 {
     max-height: 300px;
   }
 
+  .date-selector-section {
+    width: 100%;
+  }
+
   .date-selector {
-    flex-direction: column;
+    display: flex;
+    flex-direction: row;
     gap: 10px;
+    align-items: center;
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: nowrap;
   }
 
   .selected-date {
     min-width: auto;
     font-size: 1rem;
+    flex: 1;
+    text-align: center;
+    order: 2;
+  }
+
+  .date-nav-button {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .date-nav-button:first-of-type {
+    order: 1;
+  }
+
+  .date-nav-button:last-of-type {
+    order: 3;
+  }
+
+  .date-nav-button:first-of-type {
+    order: 1;
+  }
+
+  .date-nav-button:last-of-type {
+    order: 3;
   }
 
 
@@ -1038,7 +1095,4 @@ h2 {
     align-items: stretch;
   }
 
-  .task-delete-button {
-    width: 100%;
-  }
 }

@@ -1175,7 +1175,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
 
           {/* 実行時間カラム（時間軸） */}
           <div className="timeline-section">
-            <h2>実行時間（時間軸）</h2>
+            <h2>実行時間</h2>
             {tasks.length === 0 ? (
               <p className="no-tasks">タスクがありません。</p>
             ) : (
