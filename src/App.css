@@ -874,6 +874,24 @@ h2 {
   font-size: 1rem;
 }
 
+.calendar-fetch-button {
+  padding: 12px 24px;
+  background: #4285f4;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.calendar-fetch-button:hover {
+  background: #357ae8;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(66, 133, 244, 0.3);
+}
+
 .calendar-sync-button {
   padding: 10px 20px;
   background: #667eea;
