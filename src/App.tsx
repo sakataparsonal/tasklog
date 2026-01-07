@@ -68,6 +68,9 @@ function App() {
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null)
   const [isGoogleCalendarConnected, setIsGoogleCalendarConnected] = useState(false)
   const [selectedDate, setSelectedDate] = useState<Date>(new Date()) // 履歴表示用の日付
+  const [editingSession, setEditingSession] = useState<{ taskId: string; sessionIndex: number } | null>(null)
+  const [editStartTime, setEditStartTime] = useState('')
+  const [editEndTime, setEditEndTime] = useState('')
   const intervalRef = useRef<number | null>(null)
   const startTimeRef = useRef<number | null>(null)
   
@@ -427,6 +430,44 @@ ${goals.quadrant2.map((goal, idx) => {
     return report
   }
 
+  // 最重要目標をクリップボードにコピー
+  const handleCopyGoals = async () => {
+    const today = new Date()
+    const month = today.getMonth() + 1
+    const date = today.getDate()
+    const weekdays = ['日', '月', '火', '水', '木', '金', '土']
+    const weekday = weekdays[today.getDay()]
+    
+    let goalsReport = `社長
+みなさま
+
+本日の最重要目標をご報告いたします！
+本日もどうぞよろしくお願いいたします！
+
+■${month}/${date}(${weekday})
+＝＝＝＝＝＝＝＝＝＝
+■第１象限目標・タスク
+${goals.quadrant1.map((goal, idx) => {
+  const markers = ['➀', '②', '➂']
+  return `${markers[idx]} ${goal.text || '（未入力）'}`
+}).join('\n')}
+
+■第２象限目標・タスク
+${goals.quadrant2.map((goal, idx) => {
+  const markers = ['➀', '②', '➂']
+  return `${markers[idx]} ${goal.text || '（未入力）'}`
+}).join('\n')}
+＝＝＝＝＝＝＝＝＝＝`
+    
+    try {
+      await navigator.clipboard.writeText(goalsReport)
+      alert('最重要目標をクリップボードにコピーしました！')
+    } catch (err) {
+      console.error('クリップボードへのコピーに失敗しました:', err)
+      alert('コピーに失敗しました。')
+    }
+  }
+
   // 報告をクリップボードにコピー
   const handleCopyReport = async () => {
     const report = generateReport()
@@ -642,14 +683,24 @@ ${goals.quadrant2.map((goal, idx) => {
     const isToday = selectedDate.toDateString() === new Date().toDateString()
 
     // 選択した日付のセッションを取得
-    const allSessions: Array<{ taskName: string; taskColor: string; start: number; end: number; isActive: boolean }> = []
+    const allSessions: Array<{ 
+      taskId: string
+      sessionIndex: number
+      taskName: string
+      taskColor: string
+      start: number
+      end: number
+      isActive: boolean
+    }> = []
     
     tasks.forEach(task => {
-      task.sessions.forEach(session => {
+      task.sessions.forEach((session, sessionIndex) => {
         if (session.end) {
           // 終了済みセッション
           if (session.end >= selectedDateStartTime && session.start <= selectedDateEndTime) {
             allSessions.push({
+              taskId: task.id,
+              sessionIndex,
               taskName: task.name,
               taskColor: task.color || TASK_COLORS[0],
               start: Math.max(session.start, selectedDateStartTime),
@@ -658,8 +709,10 @@ ${goals.quadrant2.map((goal, idx) => {
             })
           }
         } else if (isToday && activeTaskId === task.id && session.start >= selectedDateStartTime) {
-          // 実行中のセッション（今日のみ）
+          // 実行中のセッション（今日のみ）- 編集・削除不可
           allSessions.push({
+            taskId: task.id,
+            sessionIndex,
             taskName: task.name,
             taskColor: task.color || TASK_COLORS[0],
             start: session.start,
@@ -685,6 +738,74 @@ ${goals.quadrant2.map((goal, idx) => {
         setActiveTaskId(null)
         startTimeRef.current = null
       }
+    }
+  }
+
+  // セッション編集開始
+  const handleStartEditSession = (taskId: string, sessionIndex: number, start: number, end: number, e?: React.MouseEvent | MouseEvent) => {
+    if (e) {
+      e.stopPropagation()
+    }
+    const startDate = new Date(start)
+    const endDate = new Date(end)
+    const startTimeStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}T${String(startDate.getHours()).padStart(2, '0')}:${String(startDate.getMinutes()).padStart(2, '0')}`
+    const endTimeStr = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}T${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`
+    setEditingSession({ taskId, sessionIndex })
+    setEditStartTime(startTimeStr)
+    setEditEndTime(endTimeStr)
+  }
+
+  // セッション編集保存
+  const handleSaveEditSession = () => {
+    if (!editingSession) return
+    
+    const startTimestamp = new Date(editStartTime).getTime()
+    const endTimestamp = new Date(editEndTime).getTime()
+    
+    if (isNaN(startTimestamp) || isNaN(endTimestamp) || startTimestamp >= endTimestamp) {
+      alert('開始時刻と終了時刻を正しく入力してください。')
+      return
+    }
+    
+    setTasks(prevTasks => 
+      prevTasks.map(task => {
+        if (task.id === editingSession.taskId) {
+          const newSessions = [...task.sessions]
+          newSessions[editingSession.sessionIndex] = {
+            start: startTimestamp,
+            end: endTimestamp
+          }
+          return { ...task, sessions: newSessions }
+        }
+        return task
+      })
+    )
+    
+    setEditingSession(null)
+    setEditStartTime('')
+    setEditEndTime('')
+  }
+
+  // セッション編集キャンセル
+  const handleCancelEditSession = () => {
+    setEditingSession(null)
+    setEditStartTime('')
+    setEditEndTime('')
+  }
+
+  // セッション削除
+  const handleDeleteSession = (taskId: string, sessionIndex: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (window.confirm('この実行記録を削除しますか？')) {
+      setTasks(prevTasks =>
+        prevTasks.map(task => {
+          if (task.id === taskId) {
+            const newSessions = task.sessions.filter((_, idx) => idx !== sessionIndex)
+            return { ...task, sessions: newSessions }
+          }
+          return task
+        })
+      )
     }
   }
 
@@ -759,16 +880,23 @@ ${goals.quadrant2.map((goal, idx) => {
                     placeholder="目標を入力..."
                     className="goal-input"
                   />
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
+                  <select
                     value={goal.achievementRate}
-                    onChange={(e) => handleGoalUpdate('quadrant1', idx, 'achievementRate', parseInt(e.target.value) || 0)}
-                    className="goal-rate-input"
-                    placeholder="達成率"
-                  />
-                  <span className="goal-rate-label">%</span>
+                    onChange={(e) => handleGoalUpdate('quadrant1', idx, 'achievementRate', parseInt(e.target.value))}
+                    className="goal-rate-select"
+                    style={{
+                      backgroundColor: goal.achievementRate <= 50 ? '#ffebee' : 
+                                      goal.achievementRate <= 70 ? '#fff9e6' : 
+                                      '#e3f2fd',
+                      color: goal.achievementRate <= 50 ? '#c62828' : 
+                             goal.achievementRate <= 70 ? '#f57c00' : 
+                             '#1976d2'
+                    }}
+                  >
+                    {Array.from({ length: 11 }, (_, i) => i * 10).map(rate => (
+                      <option key={rate} value={rate}>{rate}%</option>
+                    ))}
+                  </select>
                 </div>
               ))}
             </div>
@@ -784,16 +912,23 @@ ${goals.quadrant2.map((goal, idx) => {
                     placeholder="目標を入力..."
                     className="goal-input"
                   />
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
+                  <select
                     value={goal.achievementRate}
-                    onChange={(e) => handleGoalUpdate('quadrant2', idx, 'achievementRate', parseInt(e.target.value) || 0)}
-                    className="goal-rate-input"
-                    placeholder="達成率"
-                  />
-                  <span className="goal-rate-label">%</span>
+                    onChange={(e) => handleGoalUpdate('quadrant2', idx, 'achievementRate', parseInt(e.target.value))}
+                    className="goal-rate-select"
+                    style={{
+                      backgroundColor: goal.achievementRate <= 50 ? '#ffebee' : 
+                                      goal.achievementRate <= 70 ? '#fff9e6' : 
+                                      '#e3f2fd',
+                      color: goal.achievementRate <= 50 ? '#c62828' : 
+                             goal.achievementRate <= 70 ? '#f57c00' : 
+                             '#1976d2'
+                    }}
+                  >
+                    {Array.from({ length: 11 }, (_, i) => i * 10).map(rate => (
+                      <option key={rate} value={rate}>{rate}%</option>
+                    ))}
+                  </select>
                 </div>
               ))}
             </div>
@@ -943,18 +1078,66 @@ ${goals.quadrant2.map((goal, idx) => {
                   <div className="timeline">
                     {allSessions.map((session, idx) => {
                       const duration = session.end - session.start
+                      const isEditing = editingSession?.taskId === session.taskId && editingSession?.sessionIndex === session.sessionIndex
+                      
                       return (
                         <div 
-                          key={idx} 
+                          key={`${session.taskId}-${session.sessionIndex}-${idx}`} 
                           className={`timeline-item ${session.isActive ? 'active' : ''}`}
                           style={{ borderLeftColor: session.taskColor }}
                         >
-                          <div className="timeline-time">
-                            {formatDateTime(session.start)} ～ {formatDateTime(session.end)}
-                            {session.isActive && ' [実行中]'}
-                          </div>
-                          <div className="timeline-task-name">{session.taskName}</div>
-                          <div className="timeline-duration">{formatTime(duration)}</div>
+                          {isEditing ? (
+                            <div className="timeline-edit-form">
+                              <div className="timeline-edit-inputs">
+                                <div className="timeline-edit-input-group">
+                                  <label>開始時刻</label>
+                                  <input
+                                    type="datetime-local"
+                                    value={editStartTime}
+                                    onChange={(e) => setEditStartTime(e.target.value)}
+                                    className="timeline-edit-input"
+                                  />
+                                </div>
+                                <div className="timeline-edit-input-group">
+                                  <label>終了時刻</label>
+                                  <input
+                                    type="datetime-local"
+                                    value={editEndTime}
+                                    onChange={(e) => setEditEndTime(e.target.value)}
+                                    className="timeline-edit-input"
+                                  />
+                                </div>
+                              </div>
+                              <div className="timeline-edit-actions">
+                                <button onClick={handleSaveEditSession} className="timeline-edit-save">保存</button>
+                                <button onClick={handleCancelEditSession} className="timeline-edit-cancel">キャンセル</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              {!session.isActive && (
+                                <button
+                                  onClick={(e) => handleDeleteSession(session.taskId, session.sessionIndex, e)}
+                                  className="timeline-delete-button"
+                                  title="削除"
+                                >
+                                  ×
+                                </button>
+                              )}
+                              <div 
+                                className="timeline-content"
+                                onClick={!session.isActive ? () => handleStartEditSession(session.taskId, session.sessionIndex, session.start, session.end, new MouseEvent('click')) : undefined}
+                                style={{ cursor: !session.isActive ? 'pointer' : 'default' }}
+                              >
+                                <div className="timeline-time">
+                                  {formatDateTime(session.start)} ～ {formatDateTime(session.end)}
+                                  {session.isActive && ' [実行中]'}
+                                </div>
+                                <div className="timeline-task-name">{session.taskName}</div>
+                                <div className="timeline-duration">{formatTime(duration)}</div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       )
                     })}
@@ -999,8 +1182,11 @@ ${goals.quadrant2.map((goal, idx) => {
 
         {/* 報告ボタンとリセットボタン */}
         <div className="report-section">
+          <button onClick={handleCopyGoals} className="goals-button">
+            最重要目標をコピー
+          </button>
           <button onClick={handleCopyReport} className="report-button">
-            報告をコピー
+            1日の実績時間をコピー
           </button>
           <button onClick={handleResetToday} className="reset-button">
             本日をリセット
