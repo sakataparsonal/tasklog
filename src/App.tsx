@@ -21,6 +21,10 @@ interface Goals {
   quadrant2: Goal[] // 第二象限（3つ）
 }
 
+interface GoalsByDate {
+  [dateKey: string]: Goals // 日付をキーとして目標を保存（例: "2024-01-06"）
+}
+
 const TASK_COLORS = [
   '#667eea', '#764ba2', '#f093fb', '#4facfe', '#00f2fe',
   '#43e97b', '#fa709a', '#fee140', '#30cfd0', '#a8edea'
@@ -28,6 +32,14 @@ const TASK_COLORS = [
 
 const STORAGE_KEY = 'tasklog-tasks'
 const GOALS_STORAGE_KEY = 'tasklog-goals'
+
+// 日付をキーに変換（YYYY-MM-DD形式）
+const getDateKey = (date: Date): string => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
 
 function App() {
   // ローカルストレージからタスクを読み込む
@@ -43,8 +55,8 @@ function App() {
     return []
   }
 
-  // 目標を読み込む
-  const loadGoalsFromStorage = (): Goals => {
+  // 目標を読み込む（日付ごと）
+  const loadGoalsFromStorage = (): GoalsByDate => {
     try {
       const stored = localStorage.getItem(GOALS_STORAGE_KEY)
       if (stored) {
@@ -53,15 +65,26 @@ function App() {
     } catch (error) {
       console.error('Failed to load goals from storage:', error)
     }
-    // デフォルト値（空の目標3つずつ）
+    return {}
+  }
+
+  // デフォルトの目標を作成
+  const createDefaultGoals = (): Goals => {
     return {
       quadrant1: Array.from({ length: 3 }, (_, i) => ({ id: `q1-${i}`, text: '', achievementRate: 0 })),
       quadrant2: Array.from({ length: 3 }, (_, i) => ({ id: `q2-${i}`, text: '', achievementRate: 0 }))
     }
   }
 
+  // 選択した日付の目標を取得
+  const getGoalsForDate = (date: Date): Goals => {
+    const dateKey = getDateKey(date)
+    const goalsByDate = loadGoalsFromStorage()
+    return goalsByDate[dateKey] || createDefaultGoals()
+  }
+
   const [tasks, setTasks] = useState<Task[]>(loadTasksFromStorage)
-  const [goals, setGoals] = useState<Goals>(loadGoalsFromStorage)
+  const [goalsByDate, setGoalsByDate] = useState<GoalsByDate>(loadGoalsFromStorage)
   const [newTaskName, setNewTaskName] = useState('')
   const [selectedColor, setSelectedColor] = useState(TASK_COLORS[0])
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
@@ -92,11 +115,14 @@ function App() {
   // 目標をローカルストレージに保存
   useEffect(() => {
     try {
-      localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals))
+      localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goalsByDate))
     } catch (error) {
       console.error('Failed to save goals to storage:', error)
     }
-  }, [goals])
+  }, [goalsByDate])
+
+  // 選択した日付の目標を取得
+  const currentGoals = getGoalsForDate(selectedDate)
 
   // ストップウォッチの更新（UI更新用）
   useEffect(() => {
@@ -344,13 +370,13 @@ ${isToday ? '本日も一日本当にありがとうございました！' : `${
 ＝＝＝＝＝＝＝＝＝＝
 ■${isToday ? '本日' : getDateString(reportDate)}の最重要目標・タスク
 （第１象限）
-${goals.quadrant1.map((goal, idx) => {
+${currentGoals.quadrant1.map((goal, idx) => {
   const markers = ['➀', '②', '➂']
   return `${markers[idx]} ${goal.text || '（未入力）'}（達成率 ${goal.achievementRate}%）`
 }).join('\n')}
 
 （第２象限）
-${goals.quadrant2.map((goal, idx) => {
+${currentGoals.quadrant2.map((goal, idx) => {
   const markers = ['➀', '②', '➂']
   return `${markers[idx]} ${goal.text || '（未入力）'}（達成率 ${goal.achievementRate}%）`
 }).join('\n')}
@@ -447,13 +473,13 @@ ${goals.quadrant2.map((goal, idx) => {
 ■${month}/${date}(${weekday})
 ＝＝＝＝＝＝＝＝＝＝
 ■第１象限目標・タスク
-${goals.quadrant1.map((goal, idx) => {
+${currentGoals.quadrant1.map((goal, idx) => {
   const markers = ['➀', '②', '➂']
   return `${markers[idx]} ${goal.text || '（未入力）'}`
 }).join('\n')}
 
 ■第２象限目標・タスク
-${goals.quadrant2.map((goal, idx) => {
+${currentGoals.quadrant2.map((goal, idx) => {
   const markers = ['➀', '②', '➂']
   return `${markers[idx]} ${goal.text || '（未入力）'}`
 }).join('\n')}
@@ -748,8 +774,9 @@ ${goals.quadrant2.map((goal, idx) => {
     }
     const startDate = new Date(start)
     const endDate = new Date(end)
-    const startTimeStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}T${String(startDate.getHours()).padStart(2, '0')}:${String(startDate.getMinutes()).padStart(2, '0')}`
-    const endTimeStr = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}T${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`
+    // 時間のみをHH:MM形式で保存
+    const startTimeStr = `${String(startDate.getHours()).padStart(2, '0')}:${String(startDate.getMinutes()).padStart(2, '0')}`
+    const endTimeStr = `${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`
     setEditingSession({ taskId, sessionIndex })
     setEditStartTime(startTimeStr)
     setEditEndTime(endTimeStr)
@@ -759,11 +786,45 @@ ${goals.quadrant2.map((goal, idx) => {
   const handleSaveEditSession = () => {
     if (!editingSession) return
     
-    const startTimestamp = new Date(editStartTime).getTime()
-    const endTimestamp = new Date(editEndTime).getTime()
+    // 時間文字列（HH:MM）をパース
+    const parseTime = (timeStr: string): { hours: number; minutes: number } | null => {
+      const parts = timeStr.split(':')
+      if (parts.length !== 2) return null
+      const hours = parseInt(parts[0], 10)
+      const minutes = parseInt(parts[1], 10)
+      if (isNaN(hours) || isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+        return null
+      }
+      return { hours, minutes }
+    }
     
-    if (isNaN(startTimestamp) || isNaN(endTimestamp) || startTimestamp >= endTimestamp) {
-      alert('開始時刻と終了時刻を正しく入力してください。')
+    const startTime = parseTime(editStartTime)
+    const endTime = parseTime(editEndTime)
+    
+    if (!startTime || !endTime) {
+      alert('開始時刻と終了時刻を正しく入力してください（HH:MM形式）。')
+      return
+    }
+    
+    // 元のセッションの日付を取得
+    const originalTask = tasks.find(t => t.id === editingSession.taskId)
+    if (!originalTask) return
+    
+    const originalSession = originalTask.sessions[editingSession.sessionIndex]
+    if (!originalSession || !originalSession.end) return
+    
+    const originalStartDate = new Date(originalSession.start)
+    const originalEndDate = new Date(originalSession.end)
+    
+    // 日付は変更せず、時間のみを更新
+    const newStartDate = new Date(originalStartDate)
+    newStartDate.setHours(startTime.hours, startTime.minutes, 0, 0)
+    
+    const newEndDate = new Date(originalEndDate)
+    newEndDate.setHours(endTime.hours, endTime.minutes, 0, 0)
+    
+    if (newStartDate.getTime() >= newEndDate.getTime()) {
+      alert('開始時刻は終了時刻より前である必要があります。')
       return
     }
     
@@ -772,8 +833,8 @@ ${goals.quadrant2.map((goal, idx) => {
         if (task.id === editingSession.taskId) {
           const newSessions = [...task.sessions]
           newSessions[editingSession.sessionIndex] = {
-            start: startTimestamp,
-            end: endTimestamp
+            start: newStartDate.getTime(),
+            end: newEndDate.getTime()
           }
           return { ...task, sessions: newSessions }
         }
@@ -811,18 +872,60 @@ ${goals.quadrant2.map((goal, idx) => {
 
   // 目標を更新
   const handleGoalUpdate = (quadrant: 'quadrant1' | 'quadrant2', index: number, field: 'text' | 'achievementRate', value: string | number) => {
-    setGoals(prevGoals => {
-      const newGoals = { ...prevGoals }
+    const dateKey = getDateKey(selectedDate)
+    setGoalsByDate(prevGoalsByDate => {
+      const newGoalsByDate = { ...prevGoalsByDate }
+      const currentGoals = newGoalsByDate[dateKey] || createDefaultGoals()
+      const newGoals = { ...currentGoals }
       const goal = { ...newGoals[quadrant][index] }
+      
       if (field === 'text') {
         goal.text = value as string
       } else {
         goal.achievementRate = Math.max(0, Math.min(100, value as number))
       }
+      
       newGoals[quadrant] = [...newGoals[quadrant]]
       newGoals[quadrant][index] = goal
-      return newGoals
+      newGoalsByDate[dateKey] = newGoals
+      
+      return newGoalsByDate
     })
+  }
+
+  // 前日の目標をコピー
+  const handleCopyPreviousDayGoals = () => {
+    const prevDate = new Date(selectedDate)
+    prevDate.setDate(prevDate.getDate() - 1)
+    const prevDateKey = getDateKey(prevDate)
+    const currentDateKey = getDateKey(selectedDate)
+    
+    const prevGoals = goalsByDate[prevDateKey]
+    if (!prevGoals) {
+      alert('前日の目標が見つかりません。')
+      return
+    }
+    
+    // 前日の目標をコピー（新しいIDを生成）
+    const copiedGoals: Goals = {
+      quadrant1: prevGoals.quadrant1.map((goal, idx) => ({
+        id: `q1-${idx}`,
+        text: goal.text,
+        achievementRate: goal.achievementRate
+      })),
+      quadrant2: prevGoals.quadrant2.map((goal, idx) => ({
+        id: `q2-${idx}`,
+        text: goal.text,
+        achievementRate: goal.achievementRate
+      }))
+    }
+    
+    setGoalsByDate(prevGoalsByDate => ({
+      ...prevGoalsByDate,
+      [currentDateKey]: copiedGoals
+    }))
+    
+    alert('前日の目標をコピーしました。')
   }
 
   return (
@@ -866,11 +969,16 @@ ${goals.quadrant2.map((goal, idx) => {
         
         {/* 最重要目標セクション */}
         <div className="goals-section">
-          <h2>最重要目標</h2>
+          <div className="goals-header">
+            <h2>最重要目標</h2>
+            <button onClick={handleCopyPreviousDayGoals} className="copy-previous-goals-button">
+              前日の目標をコピー
+            </button>
+          </div>
           <div className="goals-container">
             <div className="goal-quadrant">
               <h3>第１象限</h3>
-              {goals.quadrant1.map((goal, idx) => (
+              {currentGoals.quadrant1.map((goal, idx) => (
                 <div key={goal.id} className="goal-item">
                   <div className="goal-number">{idx === 0 ? '➀' : idx === 1 ? '②' : '➂'}</div>
                   <input
@@ -887,9 +995,11 @@ ${goals.quadrant2.map((goal, idx) => {
                     style={{
                       backgroundColor: goal.achievementRate <= 50 ? '#ffebee' : 
                                       goal.achievementRate <= 70 ? '#fff9e6' : 
+                                      goal.achievementRate <= 90 ? '#e8f5e9' : 
                                       '#e3f2fd',
                       color: goal.achievementRate <= 50 ? '#c62828' : 
                              goal.achievementRate <= 70 ? '#f57c00' : 
+                             goal.achievementRate <= 90 ? '#2e7d32' : 
                              '#1976d2'
                     }}
                   >
@@ -902,7 +1012,7 @@ ${goals.quadrant2.map((goal, idx) => {
             </div>
             <div className="goal-quadrant">
               <h3>第２象限</h3>
-              {goals.quadrant2.map((goal, idx) => (
+              {currentGoals.quadrant2.map((goal, idx) => (
                 <div key={goal.id} className="goal-item">
                   <div className="goal-number">{idx === 0 ? '➀' : idx === 1 ? '②' : '➂'}</div>
                   <input
@@ -919,9 +1029,11 @@ ${goals.quadrant2.map((goal, idx) => {
                     style={{
                       backgroundColor: goal.achievementRate <= 50 ? '#ffebee' : 
                                       goal.achievementRate <= 70 ? '#fff9e6' : 
+                                      goal.achievementRate <= 90 ? '#e8f5e9' : 
                                       '#e3f2fd',
                       color: goal.achievementRate <= 50 ? '#c62828' : 
                              goal.achievementRate <= 70 ? '#f57c00' : 
+                             goal.achievementRate <= 90 ? '#2e7d32' : 
                              '#1976d2'
                     }}
                   >
@@ -1092,7 +1204,7 @@ ${goals.quadrant2.map((goal, idx) => {
                                 <div className="timeline-edit-input-group">
                                   <label>開始時刻</label>
                                   <input
-                                    type="datetime-local"
+                                    type="time"
                                     value={editStartTime}
                                     onChange={(e) => setEditStartTime(e.target.value)}
                                     className="timeline-edit-input"
@@ -1101,7 +1213,7 @@ ${goals.quadrant2.map((goal, idx) => {
                                 <div className="timeline-edit-input-group">
                                   <label>終了時刻</label>
                                   <input
-                                    type="datetime-local"
+                                    type="time"
                                     value={editEndTime}
                                     onChange={(e) => setEditEndTime(e.target.value)}
                                     className="timeline-edit-input"
