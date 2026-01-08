@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
+import { signInWithGoogle, signOut, onAuthStateChange } from './firebase/auth'
+import { saveUserData, subscribeUserData } from './firebase/firestore'
+import type { User } from 'firebase/auth'
 
 interface Task {
   id: string
@@ -30,9 +33,7 @@ const TASK_COLORS = [
   '#43e97b', '#fa709a', '#fee140', '#30cfd0', '#a8edea'
 ]
 
-const STORAGE_KEY = 'tasklog-tasks'
 const GOALS_STORAGE_KEY = 'tasklog-goals'
-const TASKS_DATE_KEY = 'tasklog-tasks-date' // タスクリストの日付を保存
 
 // 日付をキーに変換（YYYY-MM-DD形式）
 const getDateKey = (date: Date): string => {
@@ -43,41 +44,6 @@ const getDateKey = (date: Date): string => {
 }
 
 function App() {
-  // ローカルストレージからタスクを読み込む
-  const loadTasksFromStorage = (): Task[] => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY)
-      const tasksDate = localStorage.getItem(TASKS_DATE_KEY)
-      const todayKey = getDateKey(new Date())
-      
-      // 保存された日付が今日でない場合は、タスクリストをクリア
-      if (tasksDate !== todayKey && stored) {
-        localStorage.removeItem(STORAGE_KEY)
-        localStorage.removeItem(TASKS_DATE_KEY)
-        return []
-      }
-      
-      if (stored) {
-        return JSON.parse(stored)
-      }
-    } catch (error) {
-      console.error('Failed to load tasks from storage:', error)
-    }
-    return []
-  }
-
-  // 目標を読み込む（日付ごと）
-  const loadGoalsFromStorage = (): GoalsByDate => {
-    try {
-      const stored = localStorage.getItem(GOALS_STORAGE_KEY)
-      if (stored) {
-        return JSON.parse(stored)
-      }
-    } catch (error) {
-      console.error('Failed to load goals from storage:', error)
-    }
-    return {}
-  }
 
   // デフォルトの目標を作成
   const createDefaultGoals = (): Goals => {
@@ -93,8 +59,13 @@ function App() {
     return goals[dateKey] || createDefaultGoals()
   }
 
-  const [tasks, setTasks] = useState<Task[]>(loadTasksFromStorage)
-  const [goalsByDate, setGoalsByDate] = useState<GoalsByDate>(loadGoalsFromStorage)
+  // Firebase認証
+  const [user, setUser] = useState<User | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  
+  const [tasks, setTasks] = useState<Task[]>([]) // 現在選択中の日付のタスク
+  const [tasksByDate, setTasksByDate] = useState<{ [dateKey: string]: Task[] }>({}) // 日付ごとのタスク
+  const [goalsByDate, setGoalsByDate] = useState<GoalsByDate>({})
   const [newTaskName, setNewTaskName] = useState('')
   const [selectedColor, setSelectedColor] = useState(TASK_COLORS[0])
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
@@ -113,29 +84,247 @@ function App() {
   const [isBreak, setIsBreak] = useState(false) // true = 休憩時間, false = 作業時間
   const pomodoroIntervalRef = useRef<number | null>(null)
 
-  // タスクをローカルストレージに保存
+  // Firebase認証状態の監視
   useEffect(() => {
-    try {
-      const todayKey = getDateKey(new Date())
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
-      localStorage.setItem(TASKS_DATE_KEY, todayKey)
-    } catch (error) {
-      console.error('Failed to save tasks to storage:', error)
-    }
-  }, [tasks])
-  
-  // 日付が変わったときにタスクリストをクリア
+    const unsubscribe = onAuthStateChange((authUser) => {
+      setUser(authUser)
+      setIsLoading(false)
+    })
+    return () => unsubscribe()
+  }, [])
+
+  // ユーザーデータをFirestoreから読み込む
   useEffect(() => {
-    const todayKey = getDateKey(new Date())
-    const storedDate = localStorage.getItem(TASKS_DATE_KEY)
-    
-    // 保存された日付が今日でない場合は、タスクリストをクリア
-    if (storedDate && storedDate !== todayKey) {
+    if (!user) {
       setTasks([])
+      setGoalsByDate({})
+      setIsGoogleCalendarConnected(false)
+      return
+    }
+
+    // Google Calendarアクセストークンの確認
+    // トークンがある場合は連携済みとして表示
+    const token = localStorage.getItem('google_access_token')
+    setIsGoogleCalendarConnected(!!token)
+
+    // リアルタイム同期を開始
+    const unsubscribe = subscribeUserData(user.uid, (data) => {
+      if (data) {
+        // tasksByDateを更新
+        const firestoreTasksByDate = data.tasksByDate || {}
+        
+        // 後方互換性: 古いtasksデータがある場合は、tasksDateの日付に保存
+        if (data.tasks && data.tasks.length > 0 && data.tasksDate) {
+          const oldTasks = data.tasks
+          const oldDateKey = data.tasksDate
+          if (!firestoreTasksByDate[oldDateKey] || firestoreTasksByDate[oldDateKey].length === 0) {
+            console.log('🔄 古いタスクデータを移行します:', oldDateKey)
+            firestoreTasksByDate[oldDateKey] = oldTasks
+          }
+        }
+        
+        // tasksByDateを更新（実際に変更があった場合のみ）
+        setTasksByDate(prevTasksByDate => {
+          // 変更があったかどうかを確認
+          const prevKeys = Object.keys(prevTasksByDate)
+          const newKeys = Object.keys(firestoreTasksByDate)
+          const hasChanges = prevKeys.length !== newKeys.length ||
+            !prevKeys.every(key => {
+              const prevTasks = prevTasksByDate[key] || []
+              const newTasks = firestoreTasksByDate[key] || []
+              if (prevTasks.length !== newTasks.length) return true
+              const prevIds = new Set(prevTasks.map((t: Task) => t.id))
+              const newIds = new Set(newTasks.map((t: Task) => t.id))
+              return Array.from(prevIds).every(id => newIds.has(id)) &&
+                Array.from(newIds).every(id => prevIds.has(id))
+            })
+          
+          if (!hasChanges) {
+            // 変更がない場合は更新しない（無限ループを防ぐ）
+            return prevTasksByDate
+          }
+          
+          return firestoreTasksByDate
+        })
+        
+        // 日付が変わった場合は実行中のタスクをクリア
+        const todayKey = getDateKey(new Date())
+        if (data.tasksDate !== todayKey) {
+          setActiveTaskId(null)
+          startTimeRef.current = null
+        } else {
+          // 実行中のタスクを復元（今日のタスクのみ）
+          if (data.activeTaskId && data.activeTaskStartTime) {
+            const todayTasks = firestoreTasksByDate[todayKey] || []
+            const activeTask = todayTasks.find((t: Task) => t.id === data.activeTaskId)
+            
+            // 実行中のセッション（endがないセッション）があるか確認
+            if (activeTask && activeTask.sessions && activeTask.sessions.some((s: any) => !s.end)) {
+              console.log('🔄 実行中のタスクを復元:', data.activeTaskId, '開始時刻:', data.activeTaskStartTime)
+              setActiveTaskId(data.activeTaskId)
+              startTimeRef.current = data.activeTaskStartTime
+            } else {
+              // 実行中のセッションがない場合はクリア
+              if (activeTaskId !== null || startTimeRef.current !== null) {
+                console.log('🔄 実行中のセッションがないため、activeTaskIdをクリア')
+                setActiveTaskId(null)
+                startTimeRef.current = null
+              }
+            }
+          } else {
+            // Firestoreに実行中のタスクがない場合はクリア
+            if (activeTaskId !== null || startTimeRef.current !== null) {
+              console.log('🔄 Firestoreに実行中のタスクがないため、activeTaskIdをクリア')
+              setActiveTaskId(null)
+              startTimeRef.current = null
+            }
+          }
+          // 目標をマージ（既存の目標を保持）
+          setGoalsByDate(prevGoalsByDate => {
+            const firestoreGoals = data.goalsByDate || {}
+            // 現在の目標とFirestoreの目標をマージ（現在の目標を優先）
+            const mergedGoals = { ...firestoreGoals }
+            
+            // 現在の目標がある場合は、それを優先
+            Object.keys(prevGoalsByDate).forEach(dateKey => {
+              if (prevGoalsByDate[dateKey]) {
+                mergedGoals[dateKey] = prevGoalsByDate[dateKey]
+              }
+            })
+            
+            console.log('🎯 目標をマージ:', { 
+              prevGoalsCount: Object.keys(prevGoalsByDate).length,
+              firestoreGoalsCount: Object.keys(firestoreGoals).length,
+              mergedGoalsCount: Object.keys(mergedGoals).length
+            })
+            
+            return mergedGoals
+          })
+        }
+      } else {
+        setTasks([])
+        setGoalsByDate({})
+        setActiveTaskId(null)
+        startTimeRef.current = null
+      }
+    })
+
+    return () => unsubscribe()
+  }, [user])
+
+  // selectedDateが変わったときに、その日付のタスクを読み込む
+  useEffect(() => {
+    if (!user) return
+    
+    const dateKey = getDateKey(selectedDate)
+    const dateTasks = tasksByDate[dateKey] || []
+    
+    console.log('📅 selectedDateが変わりました:', dateKey)
+    console.log('📅 tasksByDateのキー:', Object.keys(tasksByDate))
+    console.log('📅 該当日付のタスク数:', dateTasks.length)
+    console.log('📅 現在のtasks数:', tasks.length)
+    
+    // 必ずその日付のタスクを読み込む
+    console.log('📅 タスクを読み込みます:', dateKey, 'タスク数:', dateTasks.length)
+    setTasks(dateTasks)
+  }, [selectedDate, user])
+  
+  // tasksByDateが更新されたときに、現在選択中の日付のタスクを読み込む
+  // 選択中の日付のタスクIDリストを文字列化して監視
+  const dateKeyForTasks = getDateKey(selectedDate)
+  const dateTasksForWatch = tasksByDate[dateKeyForTasks] || []
+  const dateTaskIdsString = dateTasksForWatch.map(t => t.id).sort().join(',')
+  
+  useEffect(() => {
+    if (!user) return
+    
+    const dateKey = getDateKey(selectedDate)
+    const dateTasks = tasksByDate[dateKey] || []
+    
+    console.log('📅 tasksByDateが更新されました:', dateKey, 'タスク数:', dateTasks.length)
+    
+    // 現在のタスクと比較（IDのみで比較して無限ループを防ぐ）
+    const currentTaskIds = new Set(tasks.map(t => t.id).sort())
+    const dateTaskIds = new Set(dateTasks.map(t => t.id).sort())
+    const isDifferent = tasks.length !== dateTasks.length || 
+      !Array.from(currentTaskIds).every(id => dateTaskIds.has(id)) ||
+      !Array.from(dateTaskIds).every(id => currentTaskIds.has(id))
+    
+    if (isDifferent) {
+      console.log('📅 タスクが異なるため、tasksを更新します:', dateKey, 'タスク数:', dateTasks.length)
+      setTasks(dateTasks)
+    } else {
+      console.log('📅 タスクは同じため、更新しません')
+    }
+  }, [dateTaskIdsString, selectedDate, user])
+
+  // Firestoreにデータを保存
+  useEffect(() => {
+    if (!user) return
+
+    const saveData = async () => {
+      try {
+        const todayKey = getDateKey(new Date())
+        const selectedDateKey = getDateKey(selectedDate)
+        
+        // 現在のタスクをtasksByDateに保存
+        const updatedTasksByDate = { ...tasksByDate }
+        updatedTasksByDate[selectedDateKey] = tasks
+        
+        // 実際に変更があった場合のみ保存（無限ループを防ぐ）
+        const currentTasksByDate = tasksByDate[selectedDateKey] || []
+        const currentTaskIds = new Set(currentTasksByDate.map(t => t.id))
+        const newTaskIds = new Set(tasks.map(t => t.id))
+        const hasChanges = currentTasksByDate.length !== tasks.length ||
+          !Array.from(currentTaskIds).every(id => newTaskIds.has(id)) ||
+          !Array.from(newTaskIds).every(id => currentTaskIds.has(id))
+        
+        if (!hasChanges && Object.keys(updatedTasksByDate).length === Object.keys(tasksByDate).length) {
+          // 変更がない場合は保存しない
+          return
+        }
+        
+        await saveUserData(user.uid, {
+          tasks: [], // 後方互換性のため空配列を保存
+          tasksByDate: updatedTasksByDate,
+          goalsByDate,
+          tasksDate: todayKey,
+          activeTaskId: activeTaskId,
+          activeTaskStartTime: startTimeRef.current
+        })
+      } catch (error) {
+        console.error('Failed to save data to Firestore:', error)
+      }
+    }
+
+    // デバウンスして保存（連続した変更を防ぐ）
+    const timeoutId = setTimeout(saveData, 1000)
+    return () => clearTimeout(timeoutId)
+  }, [tasks, tasksByDate, selectedDate, goalsByDate, activeTaskId, user])
+  
+  // 日付が変わったときに、その日付のタスクを自動取得
+  useEffect(() => {
+    if (!user) return
+    
+    const todayKey = getDateKey(new Date())
+    const lastTasksDate = localStorage.getItem(`tasksDate_${user.uid}`)
+    
+    // 日付が変わった場合
+    if (lastTasksDate && lastTasksDate !== todayKey) {
+      console.log('📅 日付が変わりました。今日のタスクを自動取得します:', todayKey)
       setActiveTaskId(null)
       startTimeRef.current = null
+      localStorage.setItem(`tasksDate_${user.uid}`, todayKey)
+      
+      // 今日のタスクを自動取得（Googleカレンダー連携済みの場合）
+      const token = localStorage.getItem('google_access_token')
+      if (token && isGoogleCalendarConnected) {
+        fetchTasksFromGoogleCalendar(new Date()).catch((error) => {
+          console.error('📅 自動タスク取得に失敗しました:', error)
+        })
+      }
     }
-  }, [])
+  }, [user, isGoogleCalendarConnected])
 
   // 目標をローカルストレージに保存
   useEffect(() => {
@@ -166,12 +355,68 @@ function App() {
 
   const dayBackgroundColor = getDayBackgroundColor(selectedDate)
 
-  // ストップウォッチの更新（UI更新用）
+  // ストップウォッチの更新（UI更新用）と自動停止チェック
   useEffect(() => {
     if (activeTaskId && startTimeRef.current) {
       intervalRef.current = window.setInterval(() => {
-        // UI更新のためのインターバル（必要に応じて使用）
-      }, 1000)
+        // 9時間59分59秒（35999000ミリ秒）経過したら自動停止
+        const MAX_DURATION = 9 * 60 * 60 * 1000 + 59 * 60 * 1000 + 59 * 1000 // 9:59:59
+        const elapsed = Date.now() - startTimeRef.current!
+        
+        if (elapsed >= MAX_DURATION) {
+          console.log('⏰ 実行時間が9時間59分59秒を超えたため、自動停止します')
+          // 自動停止処理
+          const now = Date.now()
+          const updatedTasks = tasks.map(task => {
+            if (task.id === activeTaskId) {
+              // 実行中のセッション（endがないもの）をすべて終了させる
+              const updatedSessions = task.sessions.map(session => {
+                if (!session.end) {
+                  console.log('⏰ セッションを自動終了:', { start: session.start, end: now })
+                  return { ...session, end: now }
+                }
+                return session
+              })
+              return {
+                ...task,
+                sessions: updatedSessions
+              }
+            }
+            return task
+          })
+          
+          setTasks(updatedTasks)
+          setActiveTaskId(null)
+          startTimeRef.current = null
+          
+          // tasksByDateも更新
+          const selectedDateKey = getDateKey(selectedDate)
+          setTasksByDate(prevTasksByDate => {
+            const updated = { ...prevTasksByDate }
+            updated[selectedDateKey] = updatedTasks
+            return updated
+          })
+          
+          // Firestoreに保存
+          if (user) {
+            const todayKey = getDateKey(new Date())
+            const updatedTasksByDate = { ...tasksByDate }
+            updatedTasksByDate[selectedDateKey] = updatedTasks
+            saveUserData(user.uid, {
+              tasks: [],
+              tasksByDate: updatedTasksByDate,
+              goalsByDate,
+              tasksDate: todayKey,
+              activeTaskId: null,
+              activeTaskStartTime: null
+            }).then(() => {
+              console.log('⏰ Firestoreに自動停止状態を保存しました')
+            }).catch((error) => {
+              console.error('⏰ Firestoreへの保存に失敗しました:', error)
+            })
+          }
+        }
+      }, 1000) // 1秒ごとにチェック
     } else {
       if (intervalRef.current) {
         clearInterval(intervalRef.current)
@@ -184,7 +429,7 @@ function App() {
         clearInterval(intervalRef.current)
       }
     }
-  }, [activeTaskId])
+  }, [activeTaskId, tasks, goalsByDate, user])
 
   // ポモドーロタイマーの更新
   useEffect(() => {
@@ -269,10 +514,20 @@ function App() {
         color: selectedColor,
         order: 0
       }
-      setTasks(prevTasks => [
-        newTask,
-        ...prevTasks.map(task => ({ ...task, order: task.order + 1 }))
-      ])
+      const selectedDateKey = getDateKey(selectedDate)
+      setTasks(prevTasks => {
+        const updatedTasks = [
+          newTask,
+          ...prevTasks.map(task => ({ ...task, order: task.order + 1 }))
+        ]
+        // tasksByDateも更新
+        setTasksByDate(prevTasksByDate => {
+          const updated = { ...prevTasksByDate }
+          updated[selectedDateKey] = updatedTasks
+          return updated
+        })
+        return updatedTasks
+      })
       setNewTaskName('')
     }
   }
@@ -289,6 +544,7 @@ function App() {
   const handleDrop = (targetTaskId: string) => {
     if (!draggedTaskId || draggedTaskId === targetTaskId) return
 
+    const selectedDateKey = getDateKey(selectedDate)
     setTasks(prevTasks => {
       const draggedTask = prevTasks.find(t => t.id === draggedTaskId)
       const targetTask = prevTasks.find(t => t.id === targetTaskId)
@@ -300,81 +556,184 @@ function App() {
       newTasks.splice(targetIndex, 0, draggedTask)
       
       // orderを更新
-      return newTasks.map((task, index) => ({
+      const updatedTasks = newTasks.map((task, index) => ({
         ...task,
         order: index
       }))
+      
+      // tasksByDateも更新
+      setTasksByDate(prevTasksByDate => {
+        const updated = { ...prevTasksByDate }
+        updated[selectedDateKey] = updatedTasks
+        return updated
+      })
+      
+      return updatedTasks
     })
     
     setDraggedTaskId(null)
   }
 
   // タスク選択/停止
-  const handleTaskToggle = (taskId: string) => {
+  const handleTaskToggle = async (taskId: string) => {
     if (activeTaskId === taskId) {
       // 停止
-      if (startTimeRef.current) {
-        const now = Date.now()
-        setTasks(prevTasks => {
-          return prevTasks.map(task => {
-            if (task.id === taskId) {
-              // 実行中のセッション（endがないもの）をすべて終了させる
-              const updatedSessions = task.sessions.map(session => {
-                if (!session.end) {
-                  return { ...session, end: now }
-                }
-                return session
-              })
-              return {
-                ...task,
-                sessions: updatedSessions
-              }
+      const now = Date.now()
+      console.log('🛑 タスクを停止:', taskId, 'now:', now)
+      const updatedTasks = tasks.map(task => {
+        if (task.id === taskId) {
+          // 実行中のセッション（endがないもの）をすべて終了させる
+          const updatedSessions = task.sessions.map(session => {
+            if (!session.end) {
+              console.log('🛑 セッションを終了:', { start: session.start, end: now })
+              return { ...session, end: now }
             }
-            return task
+            return session
           })
-        })
-      }
+          const hasActiveSessions = task.sessions.some(s => !s.end)
+          console.log('🛑 停止処理完了:', { 
+            taskName: task.name, 
+            hadActiveSessions: hasActiveSessions,
+            updatedSessionsCount: updatedSessions.length 
+          })
+          return {
+            ...task,
+            sessions: updatedSessions
+          }
+        }
+        return task
+      })
+      setTasks(updatedTasks)
       setActiveTaskId(null)
       startTimeRef.current = null
+      
+      // tasksByDateも更新
+      const selectedDateKey = getDateKey(selectedDate)
+      setTasksByDate(prevTasksByDate => {
+        const updated = { ...prevTasksByDate }
+        updated[selectedDateKey] = updatedTasks
+        return updated
+      })
+      
+      // 即座にFirestoreに保存
+      if (user) {
+        try {
+          const todayKey = getDateKey(new Date())
+          const updatedTasksByDate = { ...tasksByDate }
+          updatedTasksByDate[selectedDateKey] = updatedTasks
+          await saveUserData(user.uid, {
+            tasks: [],
+            tasksByDate: updatedTasksByDate,
+            goalsByDate,
+            tasksDate: todayKey,
+            activeTaskId: null,
+            activeTaskStartTime: null
+          })
+          console.log('🛑 Firestoreに停止状態を保存しました')
+        } catch (error) {
+          console.error('🛑 Firestoreへの保存に失敗しました:', error)
+        }
+      }
     } else {
       // 他のタスクが実行中なら停止
-      if (activeTaskId && startTimeRef.current) {
-        const now = Date.now()
-        setTasks(prevTasks => {
-          return prevTasks.map(task => {
-            if (task.id === activeTaskId) {
-              // 実行中のセッション（endがないもの）をすべて終了させる
-              const updatedSessions = task.sessions.map(session => {
-                if (!session.end) {
-                  return { ...session, end: now }
-                }
-                return session
-              })
-              return {
-                ...task,
-                sessions: updatedSessions
-              }
-            }
-            return task
-          })
-        })
-      }
-      
-      // 新しいタスクを開始
+      let updatedTasks = tasks
       const now = Date.now()
-      startTimeRef.current = now
-      setActiveTaskId(taskId)
-      setTasks(prevTasks => {
-        return prevTasks.map(task => {
-          if (task.id === taskId) {
+      
+      if (activeTaskId && startTimeRef.current) {
+        updatedTasks = tasks.map(task => {
+          if (task.id === activeTaskId) {
+            // 実行中のセッション（endがないもの）をすべて終了させる
+            const updatedSessions = task.sessions.map(session => {
+              if (!session.end) {
+                return { ...session, end: now }
+              }
+              return session
+            })
             return {
               ...task,
-              sessions: [...task.sessions, { start: now }]
+              sessions: updatedSessions
             }
           }
           return task
         })
+      }
+      
+      // 新しいタスクを開始
+      console.log('▶️ タスクを開始:', taskId, 'now:', now, 'currentActiveTaskId:', activeTaskId)
+      setActiveTaskId(taskId)
+      startTimeRef.current = now
+      
+      updatedTasks = updatedTasks.map(task => {
+        if (task.id === taskId) {
+          // 既に実行中のセッション（endがないもの）があるか確認
+          const activeSessions = task.sessions.filter(session => !session.end)
+          console.log('▶️ タスク開始処理:', {
+            taskName: task.name,
+            activeSessionsCount: activeSessions.length,
+            allSessionsCount: task.sessions.length,
+            activeTaskId: activeTaskId,
+            taskId: taskId
+          })
+          
+          if (activeSessions.length > 0) {
+            // 既に実行中のセッションがある場合
+            // activeTaskIdがこのタスクでない場合は、既存のセッションを終了してから新しいセッションを開始
+            if (activeTaskId && activeTaskId !== taskId) {
+              console.log('⚠️ 他のタスクが実行中。既存の実行中セッションを終了してから新しいセッションを開始')
+              const updatedSessions = task.sessions.map(session => {
+                if (!session.end) {
+                  return { ...session, end: now }
+                }
+                return session
+              })
+              return {
+                ...task,
+                sessions: [...updatedSessions, { start: now }]
+              }
+            }
+            // 同じタスクが既に実行中の場合、新しいセッションを追加しない
+            console.log('⚠️ 既に実行中のセッションがあるため、新しいセッションを追加しません:', task.name)
+            return task
+          }
+          // 実行中のセッションがない場合は、新しいセッションを追加
+          console.log('✅ 新しいセッションを追加:', task.name)
+          return {
+            ...task,
+            sessions: [...task.sessions, { start: now }]
+          }
+        }
+        return task
       })
+      
+      setTasks(updatedTasks)
+      
+      // tasksByDateも更新
+      const selectedDateKey = getDateKey(selectedDate)
+      setTasksByDate(prevTasksByDate => {
+        const updated = { ...prevTasksByDate }
+        updated[selectedDateKey] = updatedTasks
+        return updated
+      })
+      
+      // 即座にFirestoreに保存
+      if (user) {
+        try {
+          const todayKey = getDateKey(new Date())
+          const updatedTasksByDate = { ...tasksByDate }
+          updatedTasksByDate[selectedDateKey] = updatedTasks
+          await saveUserData(user.uid, {
+            tasks: [],
+            tasksByDate: updatedTasksByDate,
+            goalsByDate,
+            tasksDate: todayKey,
+            activeTaskId: taskId,
+            activeTaskStartTime: now
+          })
+          console.log('▶️ Firestoreに開始状態を保存しました')
+        } catch (error) {
+          console.error('▶️ Firestoreへの保存に失敗しました:', error)
+        }
+      }
     }
   }
 
@@ -552,13 +911,14 @@ ${currentGoals.quadrant2.map((goal, idx) => {
   }
 
   // 本日のデータをリセット
-  const handleResetToday = () => {
+  const handleResetToday = async () => {
     if (window.confirm('選択した日付の実行時間をすべてクリアしますか？')) {
       const selectedDateStart = new Date(selectedDate)
       selectedDateStart.setHours(0, 0, 0, 0)
       const selectedDateStartTime = selectedDateStart.getTime()
       
-      setTasks(tasks.map(task => {
+      // タスクのセッションをクリア
+      const updatedTasks = tasks.map(task => {
         // 選択した日付のセッションを除外
         const filteredSessions = task.sessions.filter(session => {
           if (session.end) {
@@ -582,7 +942,9 @@ ${currentGoals.quadrant2.map((goal, idx) => {
           totalTime: remainingTime,
           sessions: filteredSessions
         }
-      }))
+      })
+      
+      setTasks(updatedTasks)
       
       // アクティブなタスクも停止
       if (activeTaskId) {
@@ -590,31 +952,62 @@ ${currentGoals.quadrant2.map((goal, idx) => {
         startTimeRef.current = null
       }
       
+      // 即座にFirestoreに保存（デバウンスを待たない）
+      if (user) {
+        try {
+          const todayKey = getDateKey(new Date())
+          const selectedDateKey = getDateKey(selectedDate)
+          const updatedTasksByDate = { ...tasksByDate }
+          updatedTasksByDate[selectedDateKey] = updatedTasks
+          console.log('🗑️ 実行時間をクリアしてFirestoreに保存します')
+          await saveUserData(user.uid, {
+            tasks: [],
+            tasksByDate: updatedTasksByDate,
+            goalsByDate,
+            tasksDate: todayKey
+          })
+          console.log('🗑️ Firestoreへの保存が完了しました')
+        } catch (error) {
+          console.error('🗑️ Firestoreへの保存に失敗しました:', error)
+        }
+      }
+      
       alert('選択した日付のデータをリセットしました。')
     }
   }
 
-  // Googleカレンダーからタスクを取得
-  const fetchTasksFromGoogleCalendar = async () => {
+  // Googleカレンダーからタスクを取得（日付を指定可能）
+  const fetchTasksFromGoogleCalendar = async (targetDate?: Date) => {
+    const dateToFetch = targetDate || new Date()
+    const dateKey = getDateKey(dateToFetch)
+    console.log('🔵 fetchTasksFromGoogleCalendar called for date:', dateKey)
+    
     try {
       const token = localStorage.getItem('google_access_token')
+      console.log('Token exists:', !!token)
+      
       if (!token) {
+        console.error('No token found')
         alert('Googleカレンダーに接続してください。')
         setIsGoogleCalendarConnected(false)
         return
       }
 
-      // 今日の日付範囲を設定
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
-      const todayEnd = new Date(today)
-      todayEnd.setHours(23, 59, 59, 999)
+      // 指定された日付の範囲を設定
+      const dateStart = new Date(dateToFetch)
+      dateStart.setHours(0, 0, 0, 0)
+      const dateEnd = new Date(dateToFetch)
+      dateEnd.setHours(23, 59, 59, 999)
       
-      const timeMin = today.toISOString()
-      const timeMax = todayEnd.toISOString()
+      const timeMin = dateStart.toISOString()
+      const timeMax = dateEnd.toISOString()
+      
+      console.log('Fetching events from', timeMin, 'to', timeMax)
 
       // Google Calendar APIを使用してイベントを取得
       const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`
+      
+      console.log('Fetching URL:', url)
       
       const response = await fetch(url, {
         headers: {
@@ -623,8 +1016,11 @@ ${currentGoals.quadrant2.map((goal, idx) => {
         }
       })
       
+      console.log('Response status:', response.status, 'ok:', response.ok)
+      
       if (response.status === 401) {
         // トークンが無効
+        console.error('Token is invalid (401)')
         localStorage.removeItem('google_access_token')
         setIsGoogleCalendarConnected(false)
         alert('認証が期限切れです。再度連携してください。')
@@ -633,17 +1029,26 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
+        console.error('API error:', errorData)
         throw new Error(errorData.error?.message || `HTTP ${response.status}`)
       }
       
       const data = await response.json()
+      console.log('API response:', data)
+      console.log('Number of items:', data.items?.length || 0)
       
       if (!data.items || data.items.length === 0) {
-        alert('今日のイベントはありません。')
+        if (!targetDate) {
+          alert('今日のイベントはありません。')
+        }
         return
       }
       
-      // 今日のイベントをタスクとして追加
+      // 指定された日付の既存のタスクを取得
+      const dateTasks = tasksByDate[dateKey] || []
+      const currentTaskIds = new Set(dateTasks.map(t => t.id))
+      
+      // イベントをタスクとして追加
       const calendarTasks: Task[] = data.items
         .filter((event: any) => {
           // 終日イベントまたは日時指定イベントを処理
@@ -662,20 +1067,59 @@ ${currentGoals.quadrant2.map((goal, idx) => {
           totalTime: 0,
           sessions: [],
           color: TASK_COLORS[index % TASK_COLORS.length],
-          order: tasks.length + index
+          order: dateTasks.length + index
         }))
       
+      console.log('🟢 Calendar tasks created:', calendarTasks.length)
+      console.log('[DEBUG] Task names:', calendarTasks.map(t => t.name))
+      console.log('[DEBUG] Task IDs:', calendarTasks.map(t => t.id))
+      
       // 既存のタスクと統合（重複を避ける）
-      setTasks(prevTasks => {
-        const existingIds = new Set(prevTasks.map(t => t.id))
-        const newTasks = calendarTasks.filter(t => !existingIds.has(t.id))
-        if (newTasks.length > 0) {
-          alert(`${newTasks.length}件のタスクを取得しました。`)
+      console.log('[DEBUG] Existing task IDs:', Array.from(currentTaskIds))
+      
+      const newTasks = calendarTasks.filter(t => {
+        const isNew = !currentTaskIds.has(t.id)
+        if (!isNew) {
+          console.log('[DEBUG] Task already exists, skipping:', t.name, t.id)
+        }
+        return isNew
+      })
+      
+      console.log('🟢 New tasks to add:', newTasks.length)
+      console.log('[DEBUG] New task names:', newTasks.map(t => t.name))
+      console.log('[DEBUG] New task IDs:', newTasks.map(t => t.id))
+      
+      // 新しいタスクがある場合のみ更新
+      if (newTasks.length > 0) {
+        const updatedDateTasks = [...dateTasks, ...newTasks]
+        
+        console.log('📅 タスクをtasksByDateに保存します:', dateKey, 'タスク数:', updatedDateTasks.length)
+        
+        // tasksByDateを更新
+        setTasksByDate(prevTasksByDate => {
+          const updated = { ...prevTasksByDate }
+          updated[dateKey] = updatedDateTasks
+          console.log('📅 tasksByDateを更新しました:', Object.keys(updated))
+          return updated
+        })
+        
+        // 現在選択中の日付の場合は、tasksも更新
+        const currentSelectedDateKey = getDateKey(selectedDate)
+        if (dateKey === currentSelectedDateKey) {
+          console.log('📅 現在選択中の日付のため、tasksも更新します')
+          setTasks(updatedDateTasks)
         } else {
+          console.log('📅 現在選択中の日付ではないため、tasksは更新しません:', dateKey, 'vs', currentSelectedDateKey)
+        }
+        
+        if (!targetDate) {
+          alert(`${newTasks.length}件のタスクを取得しました。`)
+        }
+      } else {
+        if (!targetDate) {
           alert('新しいタスクはありません。')
         }
-        return [...prevTasks, ...newTasks]
-      })
+      }
     } catch (error: any) {
       console.error('Failed to fetch from Google Calendar:', error)
       if (error.message?.includes('401')) {
@@ -688,52 +1132,6 @@ ${currentGoals.quadrant2.map((goal, idx) => {
     }
   }
 
-  // Googleカレンダー認証
-  const handleGoogleCalendarAuth = () => {
-    // 環境変数から取得（Viteの場合はimport.meta.envを使用）
-    const clientId = (import.meta.env?.VITE_GOOGLE_CLIENT_ID as string) || ''
-    if (!clientId) {
-      alert('Google Client IDが設定されていません。\n\n設定方法:\n1. プロジェクトルートに.envファイルを作成\n2. VITE_GOOGLE_CLIENT_ID=your_client_id を追加\n3. 開発サーバーを再起動\n\nGoogle Cloud ConsoleでクライアントIDを取得してください。')
-      return
-    }
-    const redirectUri = encodeURIComponent(window.location.origin)
-    const scope = encodeURIComponent('https://www.googleapis.com/auth/calendar.readonly')
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=consent`
-    
-    window.location.href = authUrl
-  }
-
-  // OAuthコールバック処理
-  useEffect(() => {
-    const hash = window.location.hash
-    
-    // エラーチェック
-    if (hash.includes('error=')) {
-      const error = hash.split('error=')[1].split('&')[0]
-      alert(`認証エラー: ${decodeURIComponent(error)}\n\nリダイレクトURIが正しく設定されているか確認してください。`)
-      window.location.hash = ''
-      return
-    }
-    
-    // アクセストークンの取得
-    if (hash.includes('access_token=')) {
-      const token = hash.split('access_token=')[1].split('&')[0]
-      const decodedToken = decodeURIComponent(token)
-      localStorage.setItem('google_access_token', decodedToken)
-      window.location.hash = ''
-      setIsGoogleCalendarConnected(true)
-      // 少し待ってから取得（状態が更新されるまで）
-      setTimeout(() => {
-        fetchTasksFromGoogleCalendar()
-      }, 500)
-    }
-    
-    // 既存のトークンをチェック
-    const existingToken = localStorage.getItem('google_access_token')
-    if (existingToken) {
-      setIsGoogleCalendarConnected(true)
-    }
-  }, [])
 
   // 日付と曜日を取得
   const getDateString = (date: Date) => {
@@ -832,14 +1230,54 @@ ${currentGoals.quadrant2.map((goal, idx) => {
   }
 
   // タスク削除
-  const handleDeleteTask = (taskId: string, e: React.MouseEvent) => {
+  const handleDeleteTask = async (taskId: string, e: React.MouseEvent) => {
     e.stopPropagation() // タスク選択のイベントを防ぐ
+    e.preventDefault() // デフォルトの動作を防ぐ
+    console.log('🗑️ タスク削除ボタンがクリックされました:', taskId)
+    
     if (window.confirm('このタスクを削除しますか？')) {
-      setTasks(prevTasks => prevTasks.filter(task => task.id !== taskId))
+      console.log('🗑️ タスクを削除します:', taskId)
+      
+      // タスクを削除
+      const selectedDateKey = getDateKey(selectedDate)
+      const filteredTasks = tasks.filter(task => task.id !== taskId)
+      console.log('🗑️ 削除前のタスク数:', tasks.length, '削除後のタスク数:', filteredTasks.length)
+      
+      setTasks(filteredTasks)
+      
+      // tasksByDateも更新
+      setTasksByDate(prevTasksByDate => {
+        const updated = { ...prevTasksByDate }
+        updated[selectedDateKey] = filteredTasks
+        return updated
+      })
+      
       if (activeTaskId === taskId) {
+        console.log('🗑️ 実行中のタスクを削除したため、activeTaskIdをクリア')
         setActiveTaskId(null)
         startTimeRef.current = null
       }
+      
+      // 即座にFirestoreに保存（デバウンスを待たない）
+      if (user) {
+        try {
+          const todayKey = getDateKey(new Date())
+          const updatedTasksByDate = { ...tasksByDate }
+          updatedTasksByDate[selectedDateKey] = filteredTasks
+          console.log('🗑️ Firestoreに削除後のタスクを即座に保存します')
+          await saveUserData(user.uid, {
+            tasks: [],
+            tasksByDate: updatedTasksByDate,
+            goalsByDate,
+            tasksDate: todayKey
+          })
+          console.log('🗑️ Firestoreへの保存が完了しました')
+        } catch (error) {
+          console.error('🗑️ Firestoreへの保存に失敗しました:', error)
+        }
+      }
+    } else {
+      console.log('🗑️ タスク削除がキャンセルされました')
     }
   }
 
@@ -949,10 +1387,18 @@ ${currentGoals.quadrant2.map((goal, idx) => {
   // 目標を更新
   const handleGoalUpdate = (quadrant: 'quadrant1' | 'quadrant2', index: number, field: 'text' | 'achievementRate', value: string | number) => {
     const dateKey = getDateKey(selectedDate)
+    console.log('🎯 目標を更新:', { quadrant, index, field, value, dateKey })
+    
     setGoalsByDate(prevGoalsByDate => {
       const newGoalsByDate = { ...prevGoalsByDate }
       const currentGoals = newGoalsByDate[dateKey] || createDefaultGoals()
-      const newGoals = { ...currentGoals }
+      
+      // 深いコピーを作成
+      const newGoals: Goals = {
+        quadrant1: currentGoals.quadrant1.map(g => ({ ...g })),
+        quadrant2: currentGoals.quadrant2.map(g => ({ ...g }))
+      }
+      
       const goal = { ...newGoals[quadrant][index] }
       
       if (field === 'text') {
@@ -964,6 +1410,9 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       newGoals[quadrant] = [...newGoals[quadrant]]
       newGoals[quadrant][index] = goal
       newGoalsByDate[dateKey] = newGoals
+      
+      console.log('🎯 更新後の目標:', newGoalsByDate[dateKey])
+      console.log('🎯 更新後の目標（quadrant）:', newGoalsByDate[dateKey]?.[quadrant])
       
       return newGoalsByDate
     })
@@ -1004,11 +1453,266 @@ ${currentGoals.quadrant2.map((goal, idx) => {
     alert('前日の目標をコピーしました。')
   }
 
+  // ログイン処理
+  const handleLogin = async () => {
+    try {
+      await signInWithGoogle()
+      // Firebase認証は完了しましたが、Google Calendar API用のアクセストークンは別途取得が必要です
+      // ユーザーが「Googleカレンダーからタスクを取得」ボタンを押したときに取得します
+      console.log('Firebase login successful. Google Calendar access token will be obtained when user clicks the button.')
+    } catch (error: any) {
+      console.error('Login failed:', error)
+      alert('ログインに失敗しました。もう一度お試しください。')
+    }
+  }
+  
+  // OAuthコールバック処理（Google Calendar API用のアクセストークン取得）
+  useEffect(() => {
+    console.log('🟡🟡🟡 OAuth callback useEffect 実行開始 🟡🟡🟡')
+    console.log('[DEBUG] ==========================================')
+    console.log('[DEBUG] OAuth callback useEffect')
+    console.log('[DEBUG] ==========================================')
+    console.log('[DEBUG] User:', user ? { uid: user.uid, email: user.email } : 'null')
+    console.log('[DEBUG] Hash:', window.location.hash ? window.location.hash.substring(0, 100) + '...' : 'empty')
+    console.log('[DEBUG] Full URL:', window.location.href)
+    
+    if (!user) {
+      console.log('🟡 [DEBUG] ユーザーがログインしていません')
+      // ハッシュにaccess_tokenが含まれている場合は、一時的に保存しておく
+      if (window.location.hash.includes('access_token=')) {
+        console.log('🟡 [DEBUG] アクセストークンがハッシュに含まれていますが、ユーザーが未ログインです')
+        console.log('🟡 [DEBUG] ハッシュを一時保存して、ユーザーログイン後に処理します')
+        // ハッシュをsessionStorageに一時保存
+        sessionStorage.setItem('pending_oauth_hash', window.location.hash)
+        console.log('🟡 [DEBUG] ハッシュをsessionStorageに保存しました')
+        // ハッシュはクリアしない（ユーザーがログインした後に処理するため）
+      }
+      console.log('[DEBUG] ==========================================')
+      console.log('[DEBUG] OAuth callback useEffect 終了（ユーザー未ログイン）')
+      console.log('[DEBUG] ==========================================')
+      return
+    }
+    
+    // ユーザーがログインしている場合、保存されたハッシュがあるか確認
+    const savedHash = sessionStorage.getItem('pending_oauth_hash')
+    if (savedHash) {
+      console.log('🟢 [DEBUG] 保存されていたハッシュを復元します')
+      console.log('[DEBUG] Saved hash:', savedHash.substring(0, 100) + '...')
+      // ハッシュを復元
+      window.location.hash = savedHash
+      sessionStorage.removeItem('pending_oauth_hash')
+      console.log('🟢 [DEBUG] ハッシュを復元しました')
+    }
+    
+    const hash = window.location.hash
+    console.log('[DEBUG] ==========================================')
+    console.log('[DEBUG] ハッシュ確認')
+    console.log('[DEBUG] ==========================================')
+    console.log('[DEBUG] Hash exists:', !!hash)
+    console.log('[DEBUG] Hash length:', hash.length)
+    console.log('[DEBUG] Hash content:', hash ? hash.substring(0, 150) + '...' : 'empty')
+    console.log('[DEBUG] Hash includes access_token:', hash.includes('access_token='))
+    console.log('[DEBUG] Hash includes error:', hash.includes('error='))
+    
+    // エラーチェック
+    if (hash.includes('error=')) {
+      const error = hash.split('error=')[1].split('&')[0]
+      const decodedError = decodeURIComponent(error)
+      console.error('🔴 OAuth error:', decodedError)
+      if (!decodedError.includes('access_denied')) {
+        // access_denied以外のエラーは表示
+        alert(`認証エラー: ${decodedError}`)
+      }
+      window.location.hash = ''
+      sessionStorage.removeItem('google_calendar_token_requested')
+      return
+    }
+    
+    // アクセストークンの取得（Google Calendar API用）
+    if (hash.includes('access_token=')) {
+      console.log('🟢🟢🟢 OAuth callback: access_token found 🟢🟢🟢')
+      console.log('[DEBUG] ==========================================')
+      console.log('[DEBUG] OAuth認証成功 - トークン処理開始')
+      console.log('[DEBUG] ==========================================')
+      console.log('[DEBUG] Hash length:', hash.length)
+      console.log('[DEBUG] Hash preview:', hash.substring(0, 150) + '...')
+      console.log('[DEBUG] User:', { uid: user.uid, email: user.email })
+      
+      try {
+        const tokenMatch = hash.match(/access_token=([^&]+)/)
+        if (!tokenMatch) {
+          console.error('🔴 [DEBUG] Failed to extract access token from hash')
+          console.error('[DEBUG] Hash:', hash)
+          alert('アクセストークンの取得に失敗しました。再度お試しください。')
+          window.location.hash = ''
+          return
+        }
+        
+        const decodedToken = decodeURIComponent(tokenMatch[1])
+        console.log('🟢 [DEBUG] Token extracted successfully')
+        console.log('[DEBUG] Token length:', decodedToken.length)
+        console.log('[DEBUG] Token preview:', decodedToken.substring(0, 30) + '...')
+        
+        // トークンを保存
+        localStorage.setItem('google_access_token', decodedToken)
+        console.log('🟢 [DEBUG] Token saved to localStorage')
+        
+        // 保存されたトークンを確認
+        const savedToken = localStorage.getItem('google_access_token')
+        console.log('[DEBUG] Saved token verified:', savedToken ? `exists (length: ${savedToken.length})` : 'NOT FOUND')
+        
+        // ハッシュをクリア
+        window.location.hash = ''
+        sessionStorage.removeItem('google_calendar_token_requested')
+        setIsGoogleCalendarConnected(true)
+        console.log('🟢 [DEBUG] isGoogleCalendarConnected set to true')
+        
+        // 自動でカレンダーからタスクを取得
+        console.log('🟣🟣🟣 OAuth認証成功、自動でタスクを取得します 🟣🟣🟣')
+        console.log('[DEBUG] ==========================================')
+        console.log('[DEBUG] 自動タスク取得処理開始')
+        console.log('[DEBUG] ==========================================')
+        console.log('[DEBUG] User info:', { uid: user.uid, email: user.email })
+        console.log('[DEBUG] Waiting 1.5 seconds before fetching...')
+        
+        // 少し待ってからタスクを取得（ページの再レンダリングを待つ）
+        setTimeout(() => {
+          console.log('[DEBUG] ==========================================')
+          console.log('[DEBUG] タイムアウト完了、タスク取得開始')
+          console.log('[DEBUG] ==========================================')
+          console.log('[DEBUG] Current user:', user ? { uid: user.uid, email: user.email } : 'null')
+          
+          const tokenCheck = localStorage.getItem('google_access_token')
+          console.log('[DEBUG] Token check before fetch:', tokenCheck ? `exists (length: ${tokenCheck.length})` : 'NOT FOUND')
+          
+          fetchTasksFromGoogleCalendar().then(() => {
+            console.log('🟢 [DEBUG] fetchTasksFromGoogleCalendar completed successfully')
+          }).catch((err: any) => {
+            console.error('🔴 [DEBUG] fetchTasksFromGoogleCalendar failed:', err)
+            console.error('[DEBUG] Error message:', err.message)
+            console.error('[DEBUG] Error stack:', err.stack)
+            alert(`タスクの取得に失敗しました: ${err.message || '不明なエラー'}\n\nブラウザのコンソール（F12キー）で詳細を確認してください。`)
+          })
+        }, 1500)
+      } catch (error: any) {
+        console.error('🔴 [DEBUG] Error processing OAuth callback:', error)
+        console.error('[DEBUG] Error message:', error.message)
+        console.error('[DEBUG] Error stack:', error.stack)
+        alert(`認証処理中にエラーが発生しました: ${error.message || '不明なエラー'}`)
+        window.location.hash = ''
+      }
+    } else {
+      console.log('🟡 ハッシュにaccess_tokenが含まれていません')
+    }
+  }, [user])
+
+  // ログアウト処理
+  const handleLogout = async () => {
+    try {
+      // ログアウト前に確実にFirestoreに保存
+      if (user) {
+        try {
+          const todayKey = getDateKey(new Date())
+          const selectedDateKey = getDateKey(selectedDate)
+          const updatedTasksByDate = { ...tasksByDate }
+          updatedTasksByDate[selectedDateKey] = tasks
+          console.log('🚪 ログアウト前にデータを保存します')
+          await saveUserData(user.uid, {
+            tasks: [],
+            tasksByDate: updatedTasksByDate,
+            goalsByDate,
+            tasksDate: todayKey,
+            activeTaskId: activeTaskId,
+            activeTaskStartTime: startTimeRef.current
+          })
+          console.log('🚪 ログアウト前の保存が完了しました')
+        } catch (error) {
+          console.error('🚪 ログアウト前の保存に失敗しました:', error)
+          // 保存に失敗してもログアウトは続行
+        }
+      }
+      
+      await signOut()
+      setTasks([])
+      setGoalsByDate({})
+      setActiveTaskId(null)
+      startTimeRef.current = null
+      setIsGoogleCalendarConnected(false)
+      localStorage.removeItem('google_access_token')
+    } catch (error: any) {
+      console.error('Logout failed:', error)
+      alert('ログアウトに失敗しました。')
+    }
+  }
+
+  // ローディング中
+  if (isLoading) {
+    return (
+      <div className="app" style={{ backgroundColor: dayBackgroundColor, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '1.2rem', color: '#666' }}>読み込み中...</div>
+        </div>
+      </div>
+    )
+  }
+
+  // ログインしていない場合
+  if (!user) {
+    return (
+      <div className="app" style={{ backgroundColor: '#f5f5f5', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', padding: '40px', backgroundColor: 'white', borderRadius: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
+          <h1 style={{ fontSize: '2rem', marginBottom: '20px', color: '#333' }}>TaskLog</h1>
+          <p style={{ marginBottom: '30px', color: '#666' }}>Googleアカウントでログインしてください</p>
+          <button 
+            onClick={handleLogin}
+            style={{
+              padding: '12px 24px',
+              backgroundColor: '#4285f4',
+              color: 'white',
+              border: 'none',
+              borderRadius: '8px',
+              fontSize: '1rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'background 0.3s'
+            }}
+            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#357ae8'}
+            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#4285f4'}
+          >
+            Googleでログイン
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="app" style={{ backgroundColor: dayBackgroundColor, minHeight: '100vh' }}>
       <div className="container">
         <div className="header-section">
-          <h1>TaskLog</h1>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <h1>TaskLog</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+              <span style={{ fontSize: '0.9rem', color: '#666' }}>{user.displayName || user.email}</span>
+              <button 
+                onClick={handleLogout}
+                style={{
+                  padding: '6px 12px',
+                  backgroundColor: '#f44336',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '0.85rem',
+                  cursor: 'pointer',
+                  transition: 'background 0.3s'
+                }}
+                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#d32f2f'}
+                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#f44336'}
+              >
+                ログアウト
+              </button>
+            </div>
+          </div>
           <div className="date-selector-section">
             <div className="date-selector">
               <button 
@@ -1142,9 +1846,9 @@ ${currentGoals.quadrant2.map((goal, idx) => {
               </button>
               <button onClick={handlePomodoroReset} className="pomodoro-reset-button">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M1 4V10H7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M23 20V14H17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14L18.36 18.36A9 9 0 0 1 3.51 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M1 4V10H7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M23 20V14H17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14L18.36 18.36A9 9 0 0 1 3.51 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
               </button>
             </div>
@@ -1262,17 +1966,22 @@ ${currentGoals.quadrant2.map((goal, idx) => {
             {/* Googleカレンダー連携 */}
             <div className="calendar-section">
               <h2>Googleカレンダー連携</h2>
-              {!isGoogleCalendarConnected ? (
-                <div>
-              <button onClick={handleGoogleCalendarAuth} className="calendar-connect-button">
-                Googleカレンダーからタスクを取得
-              </button>
-                </div>
-              ) : (
+              {isGoogleCalendarConnected ? (
                 <div className="calendar-connected">
                   <span className="calendar-status">✓ 連携済み</span>
                   <button 
-                    onClick={fetchTasksFromGoogleCalendar} 
+                    onClick={async () => {
+                      console.log('🟡🟡🟡 タスク取得ボタンがクリックされました 🟡🟡🟡')
+                      console.log('[DEBUG] Fetch button clicked (連携済み)')
+                      console.log('[DEBUG] 選択中の日付:', getDateKey(selectedDate))
+                      try {
+                        await fetchTasksFromGoogleCalendar(selectedDate)
+                        console.log('[DEBUG] fetchTasksFromGoogleCalendar completed successfully')
+                      } catch (error: any) {
+                        console.error('[DEBUG] Error in fetch button:', error)
+                        alert(`エラー: ${error.message || '不明なエラー'}`)
+                      }
+                    }} 
                     className="calendar-fetch-button"
                   >
                     タスクを取得
@@ -1286,6 +1995,62 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                     className="calendar-disconnect-button"
                   >
                     連携解除
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
+                    Googleカレンダーから今日のイベントをタスクとして取得できます。<br />
+                    初回のみ、Googleアカウントへのアクセス許可が必要です。
+                  </p>
+                  <button 
+                    onClick={async () => {
+                      // 確実にログが表示されるように、複数の方法で出力
+                      console.log('🟢🟢🟢 ボタンがクリックされました 🟢🟢🟢')
+                      console.log('=== ボタンクリック開始 ===')
+                      console.log('[DEBUG] Button clicked: Googleカレンダーからタスクを取得')
+                      console.log('[DEBUG] User:', user ? { uid: user.uid, email: user.email } : 'null')
+                      
+                      // アクセストークンが取得できていない場合は、まずアクセストークンを要求
+                      const token = localStorage.getItem('google_access_token')
+                      console.log('[DEBUG] Current token:', token ? `exists (length: ${token.length})` : 'not found')
+                      
+                      if (!token) {
+                        console.log('[DEBUG] No token, starting OAuth flow')
+                        // Google Calendar API用のアクセストークンを取得するために認証が必要
+                        const clientId = (import.meta.env?.VITE_GOOGLE_CLIENT_ID as string) || ''
+                        console.log('[DEBUG] Client ID:', clientId ? 'exists' : 'not found')
+                        if (!clientId) {
+                          alert('Google Client IDが設定されていません。')
+                          return
+                        }
+                        const redirectUri = window.location.origin
+                        const scope = 'https://www.googleapis.com/auth/calendar.readonly'
+                        // 既にFirebaseでログインしている場合、prompt=select_accountを使用（アカウント選択のみ）
+                        // 初回のみ同意画面が表示される
+                        const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&prompt=select_account`
+                        console.log('[DEBUG] Redirecting to OAuth flow:', authUrl)
+                        window.location.href = authUrl
+                        return
+                      }
+                      
+                      // アクセストークンが取得できている場合は、直接タスクを取得
+                      console.log('[DEBUG] Token exists, calling fetchTasksFromGoogleCalendar')
+                      console.log('[DEBUG] 選択中の日付:', getDateKey(selectedDate))
+                      try {
+                        await fetchTasksFromGoogleCalendar(selectedDate)
+                        console.log('[DEBUG] fetchTasksFromGoogleCalendar completed')
+                      } catch (error: any) {
+                        console.error('[DEBUG] Failed to fetch tasks:', error)
+                        console.error('[DEBUG] Error message:', error.message)
+                        console.error('[DEBUG] Error stack:', error.stack)
+                        alert(`タスクの取得に失敗しました: ${error.message || '不明なエラー'}\n\nブラウザのコンソール（F12キー）で詳細を確認してください。`)
+                      }
+                      console.log('=== ボタンクリック終了 ===')
+                    }}
+                    className="calendar-connect-button"
+                  >
+                    Googleカレンダーからタスクを取得
                   </button>
                 </div>
               )}
