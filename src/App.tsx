@@ -73,7 +73,6 @@ function App() {
   const [newTaskName, setNewTaskName] = useState('')
   const [selectedColor, setSelectedColor] = useState(TASK_COLORS[0])
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
-  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null)
   const [isGoogleCalendarConnected, setIsGoogleCalendarConnected] = useState(false)
   const [selectedDate, setSelectedDate] = useState<Date>(new Date()) // 履歴表示用の日付
   const intervalRef = useRef<number | null>(null)
@@ -582,48 +581,6 @@ function App() {
       })
       setNewTaskName('')
     }
-  }
-
-  // ドラッグ&ドロップ
-  const handleDragStart = (taskId: string) => {
-    setDraggedTaskId(taskId)
-  }
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-  }
-
-  const handleDrop = (targetTaskId: string) => {
-    if (!draggedTaskId || draggedTaskId === targetTaskId) return
-
-    const selectedDateKey = getDateKey(selectedDate)
-    setTasks(prevTasks => {
-      const draggedTask = prevTasks.find(t => t.id === draggedTaskId)
-      const targetTask = prevTasks.find(t => t.id === targetTaskId)
-      if (!draggedTask || !targetTask) return prevTasks
-
-      const newTasks = prevTasks.filter(t => t.id !== draggedTaskId)
-      const targetIndex = newTasks.findIndex(t => t.id === targetTaskId)
-      
-      newTasks.splice(targetIndex, 0, draggedTask)
-      
-      // orderを更新
-      const updatedTasks = newTasks.map((task, index) => ({
-        ...task,
-        order: index
-      }))
-      
-      // tasksByDateも更新
-      setTasksByDate(prevTasksByDate => {
-        const updated = { ...prevTasksByDate }
-        updated[selectedDateKey] = updatedTasks
-        return updated
-      })
-      
-      return updatedTasks
-    })
-    
-    setDraggedTaskId(null)
   }
 
   // タスク選択/停止
@@ -2114,7 +2071,6 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                   // Google Calendarから取得した予定時間を使用
                   // 選択した日付の範囲に合わせる
                   const taskStartDate = new Date(task.scheduledStart)
-                  const taskStartHour = taskStartDate.getHours()
                   
                   // 選択した日付とタスクの日付が一致するか確認
                   // タイムゾーンの問題を避けるため、ローカルタイムで日付を比較
