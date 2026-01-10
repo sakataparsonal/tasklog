@@ -25,8 +25,10 @@ export const signInWithGoogle = async (): Promise<{ user: User; accessToken: str
     try {
       const result = await signInWithPopup(auth, googleProvider)
       const credential = GoogleAuthProvider.credentialFromResult(result)
+      const accessToken = credential?.accessToken || null
       console.log('✅ ポップアップ方式でログインに成功しました:', result.user.email)
-      return { user: result.user, accessToken: null }
+      console.log('✅ アクセストークン取得:', accessToken ? '成功' : '失敗')
+      return { user: result.user, accessToken }
     } catch (popupError: any) {
       console.warn('ポップアップ方式が失敗しました:', popupError.code, popupError.message)
       
@@ -67,8 +69,11 @@ export const getGoogleSignInRedirectResult = async (): Promise<{ user: User; acc
       const credential = GoogleAuthProvider.credentialFromResult(result)
       const accessToken = credential?.accessToken || null
       console.log('✅ Firebase認証がリダイレクト経由で成功しました:', result.user.email)
-      console.log('✅ Google Calendar アクセストークンは別途取得が必要です')
-      return { user: result.user, accessToken: null }
+      console.log('✅ アクセストークン取得:', accessToken ? '成功' : '失敗')
+      if (accessToken) {
+        localStorage.setItem('google_access_token', accessToken)
+      }
+      return { user: result.user, accessToken }
     } else {
       console.log('ℹ️ リダイレクト結果はありません（通常のページ読み込みまたは既に認証済み）')
       return null

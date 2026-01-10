@@ -223,6 +223,7 @@ h2 {
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s;
+  position: relative;
 }
 
 .manual-task-item:hover {
@@ -244,8 +245,32 @@ h2 {
 
 .manual-task-time {
   font-size: 0.85rem;
-  color: #666;
+  color: #1976d2;
   font-family: 'Courier New', monospace;
+  font-weight: 700;
+}
+
+.manual-task-delete-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: none;
+  border: none;
+  color: #bbb;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.manual-task-item:hover .manual-task-delete-btn {
+  opacity: 1;
+}
+
+.manual-task-delete-btn:hover {
+  color: #f44336;
 }
 
 /* 実行時間リスト */
@@ -300,6 +325,110 @@ h2 {
   font-family: 'Courier New', monospace;
   white-space: nowrap;
   font-size: 1rem;
+}
+
+/* 削除ボタン（右上） */
+.execution-delete-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: none;
+  border: none;
+  color: #bbb;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.execution-item:hover .execution-delete-btn {
+  opacity: 1;
+}
+
+.execution-delete-btn:hover {
+  color: #f44336;
+}
+
+/* クリック可能な時間表示 */
+.execution-time.clickable {
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.execution-time.clickable:hover {
+  background: rgba(25, 118, 210, 0.1);
+  text-decoration: underline;
+}
+
+/* 編集モード */
+.execution-item.editing {
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  padding: 12px;
+}
+
+.execution-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.execution-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.execution-time-input {
+  padding: 6px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-family: 'Courier New', monospace;
+}
+
+.execution-edit-name {
+  font-weight: 600;
+  color: #333;
+}
+
+.execution-edit-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.execution-save-btn {
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.execution-save-btn:hover {
+  background: #43a047;
+}
+
+.execution-cancel-btn {
+  background: #9e9e9e;
+  color: white;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.execution-cancel-btn:hover {
+  background: #757575;
 }
 
 .add-task-input-row {
@@ -928,8 +1057,68 @@ h2 {
   gap: 0;
   flex: 1;
   min-height: 0;
+  max-height: 600px; /* 5時間分 (120px × 5) */
   overflow-y: auto;
   overflow-x: visible;
+  position: relative; /* 現在時刻ラインの基準 */
+}
+
+/* スクロールバーのスタイル */
+.schedule-timeline::-webkit-scrollbar {
+  width: 8px;
+}
+
+.schedule-timeline::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.schedule-timeline::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+.schedule-timeline::-webkit-scrollbar-thumb:hover {
+  background: #a1a1a1;
+}
+
+/* 現在時刻ライン */
+.current-time-line {
+  position: absolute;
+  left: 70px;
+  right: 10px;
+  height: 3px;
+  background: #ff9800;
+  z-index: 100;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(255, 152, 0, 0.5);
+}
+
+.current-time-line::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: -5px;
+  width: 12px;
+  height: 12px;
+  background: #ff9800;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(255, 152, 0, 0.5);
+}
+
+.current-time-label {
+  position: absolute;
+  left: -60px;
+  top: -7px;
+  background: #ff9800;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
 
 .schedule-time-slot {
@@ -1096,6 +1285,13 @@ h2 {
   color: #333;
   line-height: 1.2;
   margin: 2px 0;
+}
+
+.schedule-task-actual {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #1976d2;
+  margin-top: 2px;
 }
 
 .schedule-task-duration {

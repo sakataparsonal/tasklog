@@ -76,11 +76,32 @@ function App() {
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null)
   const [isGoogleCalendarConnected, setIsGoogleCalendarConnected] = useState(false)
   const [selectedDate, setSelectedDate] = useState<Date>(new Date()) // 履歴表示用の日付
-  const [editingSession, setEditingSession] = useState<{ taskId: string; sessionIndex: number } | null>(null)
-  const [editStartTime, setEditStartTime] = useState('')
-  const [editEndTime, setEditEndTime] = useState('')
   const intervalRef = useRef<number | null>(null)
   const startTimeRef = useRef<number | null>(null)
+  
+  // タイムライン同期スクロール用のref
+  const tasksTimelineRef = useRef<HTMLDivElement>(null)
+  const executionTimelineRef = useRef<HTMLDivElement>(null)
+  const isScrollingRef = useRef<boolean>(false)
+  
+  // 現在時刻（1分ごとに更新）
+  const [currentTime, setCurrentTime] = useState(new Date())
+  
+  // セッション編集用のstate
+  const [editingSession, setEditingSession] = useState<{
+    taskId: string
+    sessionIndex: number
+    startTime: string
+    endTime: string
+  } | null>(null)
+  
+  // 現在時刻を1分ごとに更新
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date())
+    }, 60000) // 1分ごと
+    return () => clearInterval(timer)
+  }, [])
   
   // ポモドーロタイマー
   const [pomodoroTime, setPomodoroTime] = useState(25 * 60) // 25分を秒で
@@ -929,6 +950,132 @@ ${currentGoals.quadrant2.map((goal, idx) => {
     }
   }
 
+  // セッション編集を開始
+  const handleEditSession = (taskId: string, sessionIndex: number, start: number, end: number) => {
+    const startDate = new Date(start)
+    const endDate = new Date(end)
+    const startTime = `${startDate.getHours().toString().padStart(2, '0')}:${startDate.getMinutes().toString().padStart(2, '0')}`
+    const endTime = `${endDate.getHours().toString().padStart(2, '0')}:${endDate.getMinutes().toString().padStart(2, '0')}`
+    setEditingSession({ taskId, sessionIndex, startTime, endTime })
+  }
+  
+  // セッション編集を保存
+  const handleSaveSession = async () => {
+    if (!editingSession) return
+    
+    const { taskId, sessionIndex, startTime, endTime } = editingSession
+    const [startHour, startMin] = startTime.split(':').map(Number)
+    const [endHour, endMin] = endTime.split(':').map(Number)
+    
+    const newStart = new Date(selectedDate)
+    newStart.setHours(startHour, startMin, 0, 0)
+    const newEnd = new Date(selectedDate)
+    newEnd.setHours(endHour, endMin, 0, 0)
+    
+    // 終了時間が開始時間より前の場合はエラー
+    if (newEnd.getTime() <= newStart.getTime()) {
+      alert('終了時間は開始時間より後にしてください')
+      return
+    }
+    
+    // タスクを更新
+    const selectedDateKey = getDateKey(selectedDate)
+    const currentTasks = tasksByDate[selectedDateKey] || []
+    const updatedTasks = currentTasks.map(task => {
+      if (task.id === taskId) {
+        const updatedSessions = task.sessions.map((session, idx) => {
+          if (idx === sessionIndex) {
+            return { ...session, start: newStart.getTime(), end: newEnd.getTime() }
+          }
+          return session
+        })
+        // totalTimeを再計算
+        const newTotalTime = updatedSessions.reduce((sum, s) => {
+          if (s.end) return sum + (s.end - s.start)
+          return sum
+        }, 0)
+        return { ...task, sessions: updatedSessions, totalTime: newTotalTime }
+      }
+      return task
+    })
+    
+    setTasksByDate(prev => ({ ...prev, [selectedDateKey]: updatedTasks }))
+    setTasks(updatedTasks)
+    setEditingSession(null)
+    
+    // Firestoreに保存
+    if (user) {
+      try {
+        const updatedTasksByDate = { ...tasksByDate, [selectedDateKey]: updatedTasks }
+        await saveUserData(user.uid, {
+          tasks: updatedTasks,
+          tasksByDate: updatedTasksByDate,
+          goalsByDate,
+          tasksDate: getDateKey(new Date())
+        })
+      } catch (error) {
+        console.error('セッション編集の保存に失敗:', error)
+      }
+    }
+  }
+  
+  // セッションを削除
+  const handleDeleteSession = async (taskId: string, sessionIndex: number) => {
+    if (!window.confirm('この実績を削除しますか？')) return
+    
+    const selectedDateKey = getDateKey(selectedDate)
+    const currentTasks = tasksByDate[selectedDateKey] || []
+    const updatedTasks = currentTasks.map(task => {
+      if (task.id === taskId) {
+        const updatedSessions = task.sessions.filter((_, idx) => idx !== sessionIndex)
+        // totalTimeを再計算
+        const newTotalTime = updatedSessions.reduce((sum, s) => {
+          if (s.end) return sum + (s.end - s.start)
+          return sum
+        }, 0)
+        return { ...task, sessions: updatedSessions, totalTime: newTotalTime }
+      }
+      return task
+    })
+    
+    setTasksByDate(prev => ({ ...prev, [selectedDateKey]: updatedTasks }))
+    setTasks(updatedTasks)
+    
+    // Firestoreに保存
+    if (user) {
+      try {
+        const updatedTasksByDate = { ...tasksByDate, [selectedDateKey]: updatedTasks }
+        await saveUserData(user.uid, {
+          tasks: updatedTasks,
+          tasksByDate: updatedTasksByDate,
+          goalsByDate,
+          tasksDate: getDateKey(new Date())
+        })
+      } catch (error) {
+        console.error('セッション削除の保存に失敗:', error)
+      }
+    }
+  }
+  
+  // タイムラインのスクロール同期ハンドラ
+  const handleTasksTimelineScroll = () => {
+    if (isScrollingRef.current) return
+    isScrollingRef.current = true
+    if (tasksTimelineRef.current && executionTimelineRef.current) {
+      executionTimelineRef.current.scrollTop = tasksTimelineRef.current.scrollTop
+    }
+    setTimeout(() => { isScrollingRef.current = false }, 10)
+  }
+  
+  const handleExecutionTimelineScroll = () => {
+    if (isScrollingRef.current) return
+    isScrollingRef.current = true
+    if (tasksTimelineRef.current && executionTimelineRef.current) {
+      tasksTimelineRef.current.scrollTop = executionTimelineRef.current.scrollTop
+    }
+    setTimeout(() => { isScrollingRef.current = false }, 10)
+  }
+
   // 報告をクリップボードにコピー
   const handleCopyReport = async () => {
     const report = generateReport()
@@ -1050,11 +1197,27 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       console.log('Response status:', response.status, 'ok:', response.ok)
       
       if (response.status === 401) {
-        // トークンが無効
-        console.error('Token is invalid (401)')
+        // トークンが無効 - 再認証を試みる
+        console.log('Token expired, attempting to refresh...')
         localStorage.removeItem('google_access_token')
+        
+        // Googleで再サインインを試みる
+        try {
+          const { signInWithGoogle } = await import('./firebase/auth')
+          const result = await signInWithGoogle()
+          if (result.accessToken) {
+            localStorage.setItem('google_access_token', result.accessToken)
+            console.log('Token refreshed, retrying...')
+            // 再度タスク取得を試みる（再帰呼び出しを避けるため、アラートのみ表示）
+            alert('認証を更新しました。もう一度「タスクを取得」ボタンを押してください。')
+            return
+          }
+        } catch (refreshError) {
+          console.error('Failed to refresh token:', refreshError)
+        }
+        
         setIsGoogleCalendarConnected(false)
-        alert('認証が期限切れです。再度連携してください。')
+        alert('認証が期限切れです。「連携解除」後、再度連携してください。')
         return
       }
       
@@ -1141,17 +1304,22 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       // 既存のタスクと統合（カレンダータスクは時間データを更新）
       console.log('[DEBUG] Existing task IDs:', Array.from(currentTaskIds))
       
-      // 既存のカレンダータスク（calendar-で始まるID）の時間データを更新
+      // 既存のカレンダータスク（calendar-で始まるID）の時間データを更新（セッションは保持）
       const updatedDateTasks = dateTasks.map(existingTask => {
         if (existingTask.id.startsWith('calendar-')) {
           const calendarTask = calendarTasks.find(ct => ct.id === existingTask.id)
           if (calendarTask) {
             console.log('[DEBUG] Updating existing calendar task:', existingTask.name, {
               oldStart: existingTask.scheduledStart ? new Date(existingTask.scheduledStart).toString() : 'undefined',
-              newStart: calendarTask.scheduledStart ? new Date(calendarTask.scheduledStart).toString() : 'undefined'
+              newStart: calendarTask.scheduledStart ? new Date(calendarTask.scheduledStart).toString() : 'undefined',
+              sessionsCount: existingTask.sessions.length,
+              totalTime: existingTask.totalTime
             })
+            // 既存のセッションとtotalTimeを保持しつつ、スケジュール情報のみ更新
             return {
               ...existingTask,
+              sessions: existingTask.sessions, // 明示的にセッションを保持
+              totalTime: existingTask.totalTime, // 明示的にtotalTimeを保持
               scheduledStart: calendarTask.scheduledStart,
               scheduledEnd: calendarTask.scheduledEnd,
               estimatedTime: calendarTask.estimatedTime
@@ -1195,19 +1363,20 @@ ${currentGoals.quadrant2.map((goal, idx) => {
         console.log('📅 現在選択中の日付ではないため、tasksは更新しません:', dateKey, 'vs', currentSelectedDateKey)
       }
       
-      if (!targetDate) {
-        if (newTasks.length > 0) {
-          alert(`${newTasks.length}件の新しいタスクを取得しました。既存タスクの時間データも更新しました。`)
-        } else {
-          alert('タスクの時間データを更新しました。')
-        }
+      // タスク取得完了メッセージを表示
+      if (newTasks.length > 0) {
+        alert(`${newTasks.length}件の新しいタスクを取得しました。`)
+      } else if (calendarTasks.length > 0) {
+        alert(`${calendarTasks.length}件のタスクを更新しました。`)
+      } else {
+        alert('カレンダーにタスクがありませんでした。')
       }
     } catch (error: any) {
       console.error('Failed to fetch from Google Calendar:', error)
-      if (error.message?.includes('401')) {
+      if (error.message?.includes('401') || error.message?.includes('認証')) {
         localStorage.removeItem('google_access_token')
         setIsGoogleCalendarConnected(false)
-        alert('認証が期限切れです。再度連携してください。')
+        alert('認証が期限切れです。「連携解除」後、再度連携してください。')
       } else {
         alert(`Googleカレンダーからの取得に失敗しました: ${error.message || '不明なエラー'}`)
       }
@@ -1363,109 +1532,6 @@ ${currentGoals.quadrant2.map((goal, idx) => {
     }
   }
 
-  // セッション編集開始
-  const handleStartEditSession = (taskId: string, sessionIndex: number, start: number, end: number, e?: React.MouseEvent | MouseEvent) => {
-    if (e) {
-      e.stopPropagation()
-    }
-    const startDate = new Date(start)
-    const endDate = new Date(end)
-    // 時間のみをHH:MM形式で保存
-    const startTimeStr = `${String(startDate.getHours()).padStart(2, '0')}:${String(startDate.getMinutes()).padStart(2, '0')}`
-    const endTimeStr = `${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`
-    setEditingSession({ taskId, sessionIndex })
-    setEditStartTime(startTimeStr)
-    setEditEndTime(endTimeStr)
-  }
-
-  // セッション編集保存
-  const handleSaveEditSession = () => {
-    if (!editingSession) return
-    
-    // 時間文字列（HH:MM）をパース
-    const parseTime = (timeStr: string): { hours: number; minutes: number } | null => {
-      const parts = timeStr.split(':')
-      if (parts.length !== 2) return null
-      const hours = parseInt(parts[0], 10)
-      const minutes = parseInt(parts[1], 10)
-      if (isNaN(hours) || isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
-        return null
-      }
-      return { hours, minutes }
-    }
-    
-    const startTime = parseTime(editStartTime)
-    const endTime = parseTime(editEndTime)
-    
-    if (!startTime || !endTime) {
-      alert('開始時刻と終了時刻を正しく入力してください（HH:MM形式）。')
-      return
-    }
-    
-    // 元のセッションの日付を取得
-    const originalTask = tasks.find(t => t.id === editingSession.taskId)
-    if (!originalTask) return
-    
-    const originalSession = originalTask.sessions[editingSession.sessionIndex]
-    if (!originalSession || !originalSession.end) return
-    
-    const originalStartDate = new Date(originalSession.start)
-    const originalEndDate = new Date(originalSession.end)
-    
-    // 日付は変更せず、時間のみを更新
-    const newStartDate = new Date(originalStartDate)
-    newStartDate.setHours(startTime.hours, startTime.minutes, 0, 0)
-    
-    const newEndDate = new Date(originalEndDate)
-    newEndDate.setHours(endTime.hours, endTime.minutes, 0, 0)
-    
-    if (newStartDate.getTime() >= newEndDate.getTime()) {
-      alert('開始時刻は終了時刻より前である必要があります。')
-      return
-    }
-    
-    setTasks(prevTasks => 
-      prevTasks.map(task => {
-        if (task.id === editingSession.taskId) {
-          const newSessions = [...task.sessions]
-          newSessions[editingSession.sessionIndex] = {
-            start: newStartDate.getTime(),
-            end: newEndDate.getTime()
-          }
-          return { ...task, sessions: newSessions }
-        }
-        return task
-      })
-    )
-    
-    setEditingSession(null)
-    setEditStartTime('')
-    setEditEndTime('')
-  }
-
-  // セッション編集キャンセル
-  const handleCancelEditSession = () => {
-    setEditingSession(null)
-    setEditStartTime('')
-    setEditEndTime('')
-  }
-
-  // セッション削除
-  const handleDeleteSession = (taskId: string, sessionIndex: number, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (window.confirm('この実行記録を削除しますか？')) {
-      setTasks(prevTasks =>
-        prevTasks.map(task => {
-          if (task.id === taskId) {
-            const newSessions = task.sessions.filter((_, idx) => idx !== sessionIndex)
-            return { ...task, sessions: newSessions }
-          }
-          return task
-        })
-      )
-    }
-  }
-
   // 目標を更新
   const handleGoalUpdate = (quadrant: 'quadrant1' | 'quadrant2', index: number, field: 'text' | 'achievementRate', value: string | number) => {
     const dateKey = getDateKey(selectedDate)
@@ -1545,10 +1611,15 @@ ${currentGoals.quadrant2.map((goal, idx) => {
         return
       }
       
-      await signInWithGoogle()
-      // Firebase認証は完了しましたが、Google Calendar API用のアクセストークンは別途取得が必要です
-      // ユーザーが「Googleカレンダーからタスクを取得」ボタンを押したときに取得します
-      console.log('Firebase login successful. Google Calendar access token will be obtained when user clicks the button.')
+      const result = await signInWithGoogle()
+      // Firebase認証完了、アクセストークンがあれば保存
+      if (result.accessToken) {
+        localStorage.setItem('google_access_token', result.accessToken)
+        setIsGoogleCalendarConnected(true)
+        console.log('Firebase login successful with access token.')
+      } else {
+        console.log('Firebase login successful. Access token will be obtained via OAuth flow.')
+      }
     } catch (error: any) {
       console.error('Login failed:', error)
       
@@ -1967,7 +2038,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
           {/* タスク一覧（時間軸表示） */}
           <div className="tasks-section">
             <div className="tasks-header">
-              <h2>タスク一覧</h2>
+              <h2>タスク一覧（スケジュール）</h2>
               <button 
                 onClick={async () => {
                   const tasks = tasksByDate[getDateKey(selectedDate)] || []
@@ -2035,6 +2106,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 start: number
                 end: number
                 estimatedTime: number
+                actualTime: number // 実績時間
               }>()
               
               tasks.forEach(task => {
@@ -2053,13 +2125,24 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                   if (taskDateKey === selectedDateKey) {
                     // 重複を防ぐためにtaskIdをキーとして使用
                     if (!scheduledTasksMap.has(task.id)) {
+                      // 実績時間を計算
+                      const actualTime = task.sessions.reduce((sum, session) => {
+                        if (session.end) {
+                          return sum + (session.end - session.start)
+                        } else if (activeTaskId === task.id) {
+                          return sum + (Date.now() - session.start)
+                        }
+                        return sum
+                      }, 0)
+                      
                       scheduledTasksMap.set(task.id, {
                         taskId: task.id,
                         taskName: task.name,
                         taskColor: task.color,
                         start: task.scheduledStart,
                         end: task.scheduledEnd,
-                        estimatedTime: task.estimatedTime
+                        estimatedTime: task.estimatedTime,
+                        actualTime: actualTime
                       })
                     }
                   }
@@ -2075,13 +2158,24 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                   
                   // 重複を防ぐためにtaskIdをキーとして使用
                   if (!scheduledTasksMap.has(task.id)) {
+                    // 実績時間を計算
+                    const actualTime = task.sessions.reduce((sum, session) => {
+                      if (session.end) {
+                        return sum + (session.end - session.start)
+                      } else if (activeTaskId === task.id) {
+                        return sum + (Date.now() - session.start)
+                      }
+                      return sum
+                    }, 0)
+                    
                     scheduledTasksMap.set(task.id, {
                       taskId: task.id,
                       taskName: task.name,
                       taskColor: task.color,
                       start: scheduledStart.getTime(),
                       end: scheduledEnd.getTime(),
-                      estimatedTime: task.estimatedTime
+                      estimatedTime: task.estimatedTime,
+                      actualTime: actualTime
                     })
                   }
                 }
@@ -2137,8 +2231,33 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 globalColumnAssignments.set(task.taskId, assignedColumn)
               }
               
+              // 現在時刻ライン用の計算
+              const now = currentTime
+              const nowHour = now.getHours()
+              const nowMinute = now.getMinutes()
+              const isToday = selectedDate.toDateString() === new Date().toDateString()
+              const showCurrentTimeLine = isToday && nowHour >= minHour && nowHour <= maxHour
+              // タイムライン全体の中での位置を計算（ピクセル単位）
+              const slotHeight = 120 // 各時間スロットの高さ
+              const currentTimePosition = showCurrentTimeLine 
+                ? ((nowHour - minHour) * slotHeight) + ((nowMinute / 60) * slotHeight)
+                : 0
+              
               return (
-                <div className="schedule-timeline">
+                <div 
+                  className="schedule-timeline"
+                  ref={tasksTimelineRef}
+                  onScroll={handleTasksTimelineScroll}
+                >
+                  {/* 現在時刻ライン */}
+                  {showCurrentTimeLine && (
+                    <div 
+                      className="current-time-line"
+                      style={{ top: `${currentTimePosition}px` }}
+                    >
+                      <span className="current-time-label">{nowHour}:{nowMinute.toString().padStart(2, '0')}</span>
+                    </div>
+                  )}
                   {hours.map(hour => {
                     // この時間帯の開始・終了時刻を計算
                     const hourStart = new Date(selectedDate)
@@ -2231,6 +2350,11 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                                     {formatDateTime(taskStartTime)} ～ {formatDateTime(taskEndTime)}
                                   </div>
                                   <div className="schedule-task-name">{task.taskName}</div>
+                                  {task.actualTime > 0 && (
+                                    <div className="schedule-task-actual">
+                                      実績: {formatTime(task.actualTime)}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             )
@@ -2270,8 +2394,17 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                           style={{ borderLeftColor: task.color }}
                           onClick={() => handleTaskToggle(task.id)}
                         >
+                          <button 
+                            className="manual-task-delete-btn"
+                            onClick={(e) => handleDeleteTask(task.id, e)}
+                            title="削除"
+                          >
+                            ×
+                          </button>
                           <span className="manual-task-name">{task.name}</span>
-                          <span className="manual-task-time">{formatTime(currentDuration)}</span>
+                          {currentDuration > 0 && (
+                            <span className="manual-task-time">実績: {formatTime(currentDuration)}</span>
+                          )}
                         </div>
                       )
                     })}
@@ -2398,10 +2531,10 @@ ${currentGoals.quadrant2.map((goal, idx) => {
             </div>
           </div>
 
-          {/* 実行時間カラム（実績時間） */}
+          {/* 実績カラム */}
           <div className="timeline-section">
             <div className="timeline-header">
-              <h2>実行時間</h2>
+              <h2>実績</h2>
               <button onClick={handleResetToday} className="timeline-clear-button">
                 クリア
               </button>
@@ -2418,8 +2551,34 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 executionHours.push(h)
               }
               
+              // 現在時刻ライン用の計算（実行時間カラム）
+              const nowExec = currentTime
+              const nowHourExec = nowExec.getHours()
+              const nowMinuteExec = nowExec.getMinutes()
+              const isTodayExec = selectedDate.toDateString() === new Date().toDateString()
+              const minHourExec = 7
+              const maxHourExec = 22
+              const showCurrentTimeLineExec = isTodayExec && nowHourExec >= minHourExec && nowHourExec <= maxHourExec
+              const slotHeightExec = 120
+              const currentTimePositionExec = showCurrentTimeLineExec 
+                ? ((nowHourExec - minHourExec) * slotHeightExec) + ((nowMinuteExec / 60) * slotHeightExec)
+                : 0
+              
               return (
-                <div className="schedule-timeline">
+                <div 
+                  className="schedule-timeline"
+                  ref={executionTimelineRef}
+                  onScroll={handleExecutionTimelineScroll}
+                >
+                  {/* 現在時刻ライン */}
+                  {showCurrentTimeLineExec && (
+                    <div 
+                      className="current-time-line"
+                      style={{ top: `${currentTimePositionExec}px` }}
+                    >
+                      <span className="current-time-label">{nowHourExec}:{nowMinuteExec.toString().padStart(2, '0')}</span>
+                    </div>
+                  )}
                   {executionHours.map(hour => {
                     const sessionsInHour = sortedSessions.filter(session => {
                       const sessionStartHour = new Date(session.start).getHours()
@@ -2442,26 +2601,71 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                             const topPercent = (startMinute / 60) * 100
                             const heightPercent = Math.max((durationMinutes / 60) * 100, 25) // 最小25%
                             
+                            const isEditing = editingSession?.taskId === session.taskId && editingSession?.sessionIndex === session.sessionIndex
+                            
                             return (
                               <div
                                 key={`${session.taskId}-${session.sessionIndex}-${idx}`}
-                                className={`execution-item ${session.isActive ? 'active' : ''}`}
+                                className={`execution-item ${session.isActive ? 'active' : ''} ${isEditing ? 'editing' : ''}`}
                                 style={{ 
                                   borderLeftColor: session.taskColor,
                                   position: 'absolute',
                                   top: `${topPercent}%`,
                                   left: 0,
                                   right: 0,
-                                  height: `${heightPercent}%`,
+                                  height: isEditing ? 'auto' : `${heightPercent}%`,
                                   minHeight: '40px',
-                                  zIndex: 1,
+                                  zIndex: isEditing ? 10 : 1,
                                 }}
                               >
-                                <span className="execution-time">
-                                  {formatDateTime(session.start)} ～ {formatDateTime(session.end)}
-                                </span>
-                                <span className="execution-name">{session.taskName}</span>
-                                <span className="execution-duration">{formatTime(duration)}</span>
+                                {isEditing ? (
+                                  <div className="execution-edit-form">
+                                    <div className="execution-edit-row">
+                                      <input
+                                        type="time"
+                                        value={editingSession.startTime}
+                                        onChange={(e) => setEditingSession({ ...editingSession, startTime: e.target.value })}
+                                        className="execution-time-input"
+                                      />
+                                      <span>～</span>
+                                      <input
+                                        type="time"
+                                        value={editingSession.endTime}
+                                        onChange={(e) => setEditingSession({ ...editingSession, endTime: e.target.value })}
+                                        className="execution-time-input"
+                                      />
+                                    </div>
+                                    <div className="execution-edit-name">{session.taskName}</div>
+                                    <div className="execution-edit-buttons">
+                                      <button onClick={handleSaveSession} className="execution-save-btn">保存</button>
+                                      <button onClick={() => setEditingSession(null)} className="execution-cancel-btn">キャンセル</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <button 
+                                      className="execution-delete-btn"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleDeleteSession(session.taskId, session.sessionIndex)
+                                      }}
+                                      title="削除"
+                                    >
+                                      ×
+                                    </button>
+                                    <span 
+                                      className="execution-time clickable"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleEditSession(session.taskId, session.sessionIndex, session.start, session.end)
+                                      }}
+                                    >
+                                      {formatDateTime(session.start)} ～ {formatDateTime(session.end)}
+                                    </span>
+                                    <span className="execution-name">{session.taskName}</span>
+                                    <span className="execution-duration">{formatTime(duration)}</span>
+                                  </>
+                                )}
                               </div>
                             )
                           })}
@@ -2469,11 +2673,14 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                       </div>
                     )
                   })}
-                  {/* 実績時間をクリップボードにコピー */}
-                    <div className="timeline-copy-section">
-                      <button onClick={handleCopyReport} className="report-button">
-                        実績をクリップボードにコピー
-                      </button>
+                </div>
+              )
+            })()}
+            {/* 実績時間をクリップボードにコピー（スクロール外） */}
+            <div className="timeline-copy-section">
+              <button onClick={handleCopyReport} className="report-button">
+                実績をクリップボードにコピー
+              </button>
                       {/* 円グラフで実績時間を表示 */}
                       {(() => {
                         // 選択された日付の各タスクの実績時間を集計
@@ -2605,10 +2812,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                           </div>
                         )
                       })()}
-                    </div>
-                  </div>
-                )
-              })()}
+            </div>
           </div>
         </div>
       </div>
