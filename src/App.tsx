@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
-import { signInWithGoogle, signOut, onAuthStateChange } from './firebase/auth'
+import { signInWithGoogle, signOut, onAuthStateChange, getGoogleSignInRedirectResult } from './firebase/auth'
 import { saveUserData, subscribeUserData } from './firebase/firestore'
+import { auth, googleProvider } from './firebase/config'
 import type { User } from 'firebase/auth'
 
 interface Task {
@@ -11,6 +12,9 @@ interface Task {
   sessions: Array<{ start: number; end?: number }> // セッション履歴
   color: string // タスクの色
   order: number // 並び順
+  estimatedTime?: number // 予定工数時間（ミリ秒、カレンダーから取得したタスクのみ）
+  scheduledStart?: number // 予定開始時間（ミリ秒、カレンダーから取得したタスクのみ）
+  scheduledEnd?: number // 予定終了時間（ミリ秒、カレンダーから取得したタスクのみ）
 }
 
 interface Goal {
@@ -86,7 +90,34 @@ function App() {
 
   // Firebase認証状態の監視
   useEffect(() => {
+    // リダイレクト後の認証結果を確認（認証状態の監視より先に実行）
+    getGoogleSignInRedirectResult()
+      .then((result) => {
+        if (result) {
+          console.log('✅ リダイレクト後のログインに成功しました:', result.user.email)
+          // 認証状態の変更を監視することで、自動的にuserが更新される
+        } else {
+          console.log('リダイレクト結果はありません（通常のページ読み込み）')
+        }
+      })
+      .catch((error: any) => {
+        console.error('❌ リダイレクト結果の取得に失敗しました:', error)
+        // エラーコードに応じてメッセージを表示
+        if (error.code === 'auth/account-exists-with-different-credential') {
+          alert('このメールアドレスは別の認証方法で既に登録されています。')
+        } else if (error.code === 'auth/invalid-credential') {
+          alert('認証情報が無効です。再度ログインしてください。')
+        } else if (error.code) {
+          console.error('認証エラー:', error.code, error.message)
+        }
+      })
+      .finally(() => {
+        // 認証状態の監視を開始（リダイレクト結果の取得後に実行）
+        setIsLoading(false)
+      })
+
     const unsubscribe = onAuthStateChange((authUser) => {
+      console.log('認証状態が変更されました:', authUser ? authUser.email : '未ログイン')
       setUser(authUser)
       setIsLoading(false)
     })
@@ -1061,26 +1092,79 @@ ${currentGoals.quadrant2.map((goal, idx) => {
           }
           return false
         })
-        .map((event: any, index: number) => ({
-          id: `calendar-${event.id}`,
-          name: event.summary || '無題のイベント',
-          totalTime: 0,
-          sessions: [],
-          color: TASK_COLORS[index % TASK_COLORS.length],
-          order: dateTasks.length + index
-        }))
+        .map((event: any, index: number) => {
+          // 予定工数時間を計算（開始時刻と終了時刻から）
+          let estimatedTime = 0
+          let scheduledStart: number | undefined = undefined
+          let scheduledEnd: number | undefined = undefined
+          
+          if (event.start?.dateTime && event.end?.dateTime) {
+            // Google Calendar APIから返されるdateTimeはISO8601形式で、タイムゾーン情報を含む
+            // new Date()でパースすると、自動的にローカルタイムに変換される
+            const startDate = new Date(event.start.dateTime)
+            const endDate = new Date(event.end.dateTime)
+            
+            
+            scheduledStart = startDate.getTime()
+            scheduledEnd = endDate.getTime()
+            estimatedTime = scheduledEnd - scheduledStart
+          } else if (event.start?.date && event.end?.date) {
+            // 終日イベントの場合、1日分として計算（8時間 = 28800000ミリ秒）
+            // 終日イベントのdateはYYYY-MM-DD形式で、タイムゾーン情報なし
+            const dateStr = event.start.date
+            const [year, month, day] = dateStr.split('-').map(Number)
+            const startDate = new Date(year, month - 1, day, 9, 0, 0, 0)
+            const endDate = new Date(year, month - 1, day, 17, 0, 0, 0)
+            
+            scheduledStart = startDate.getTime()
+            scheduledEnd = endDate.getTime()
+            estimatedTime = 8 * 60 * 60 * 1000
+          }
+          
+          return {
+            id: `calendar-${event.id}`,
+            name: event.summary || '無題のイベント',
+            totalTime: 0,
+            sessions: [],
+            color: TASK_COLORS[index % TASK_COLORS.length],
+            order: dateTasks.length + index,
+            estimatedTime: estimatedTime > 0 ? estimatedTime : undefined,
+            scheduledStart: scheduledStart,
+            scheduledEnd: scheduledEnd
+          }
+        })
       
       console.log('🟢 Calendar tasks created:', calendarTasks.length)
       console.log('[DEBUG] Task names:', calendarTasks.map(t => t.name))
       console.log('[DEBUG] Task IDs:', calendarTasks.map(t => t.id))
       
-      // 既存のタスクと統合（重複を避ける）
+      // 既存のタスクと統合（カレンダータスクは時間データを更新）
       console.log('[DEBUG] Existing task IDs:', Array.from(currentTaskIds))
+      
+      // 既存のカレンダータスク（calendar-で始まるID）の時間データを更新
+      const updatedDateTasks = dateTasks.map(existingTask => {
+        if (existingTask.id.startsWith('calendar-')) {
+          const calendarTask = calendarTasks.find(ct => ct.id === existingTask.id)
+          if (calendarTask) {
+            console.log('[DEBUG] Updating existing calendar task:', existingTask.name, {
+              oldStart: existingTask.scheduledStart ? new Date(existingTask.scheduledStart).toString() : 'undefined',
+              newStart: calendarTask.scheduledStart ? new Date(calendarTask.scheduledStart).toString() : 'undefined'
+            })
+            return {
+              ...existingTask,
+              scheduledStart: calendarTask.scheduledStart,
+              scheduledEnd: calendarTask.scheduledEnd,
+              estimatedTime: calendarTask.estimatedTime
+            }
+          }
+        }
+        return existingTask
+      })
       
       const newTasks = calendarTasks.filter(t => {
         const isNew = !currentTaskIds.has(t.id)
         if (!isNew) {
-          console.log('[DEBUG] Task already exists, skipping:', t.name, t.id)
+          console.log('[DEBUG] Task already exists (will be updated):', t.name, t.id)
         }
         return isNew
       })
@@ -1089,35 +1173,33 @@ ${currentGoals.quadrant2.map((goal, idx) => {
       console.log('[DEBUG] New task names:', newTasks.map(t => t.name))
       console.log('[DEBUG] New task IDs:', newTasks.map(t => t.id))
       
-      // 新しいタスクがある場合のみ更新
-      if (newTasks.length > 0) {
-        const updatedDateTasks = [...dateTasks, ...newTasks]
-        
-        console.log('📅 タスクをtasksByDateに保存します:', dateKey, 'タスク数:', updatedDateTasks.length)
-        
-        // tasksByDateを更新
-        setTasksByDate(prevTasksByDate => {
-          const updated = { ...prevTasksByDate }
-          updated[dateKey] = updatedDateTasks
-          console.log('📅 tasksByDateを更新しました:', Object.keys(updated))
-          return updated
-        })
-        
-        // 現在選択中の日付の場合は、tasksも更新
-        const currentSelectedDateKey = getDateKey(selectedDate)
-        if (dateKey === currentSelectedDateKey) {
-          console.log('📅 現在選択中の日付のため、tasksも更新します')
-          setTasks(updatedDateTasks)
-        } else {
-          console.log('📅 現在選択中の日付ではないため、tasksは更新しません:', dateKey, 'vs', currentSelectedDateKey)
-        }
-        
-        if (!targetDate) {
-          alert(`${newTasks.length}件のタスクを取得しました。`)
-        }
+      // 既存タスク（時間データ更新済み）と新しいタスクを統合
+      const finalDateTasks = [...updatedDateTasks, ...newTasks]
+      
+      console.log('📅 タスクをtasksByDateに保存します:', dateKey, 'タスク数:', finalDateTasks.length)
+      
+      // tasksByDateを更新（新しいタスクがなくても、時間データの更新があるので常に保存）
+      setTasksByDate(prevTasksByDate => {
+        const updated = { ...prevTasksByDate }
+        updated[dateKey] = finalDateTasks
+        console.log('📅 tasksByDateを更新しました:', Object.keys(updated))
+        return updated
+      })
+      
+      // 現在選択中の日付の場合は、tasksも更新
+      const currentSelectedDateKey = getDateKey(selectedDate)
+      if (dateKey === currentSelectedDateKey) {
+        console.log('📅 現在選択中の日付のため、tasksも更新します')
+        setTasks(finalDateTasks)
       } else {
-        if (!targetDate) {
-          alert('新しいタスクはありません。')
+        console.log('📅 現在選択中の日付ではないため、tasksは更新しません:', dateKey, 'vs', currentSelectedDateKey)
+      }
+      
+      if (!targetDate) {
+        if (newTasks.length > 0) {
+          alert(`${newTasks.length}件の新しいタスクを取得しました。既存タスクの時間データも更新しました。`)
+        } else {
+          alert('タスクの時間データを更新しました。')
         }
       }
     } catch (error: any) {
@@ -1456,13 +1538,38 @@ ${currentGoals.quadrant2.map((goal, idx) => {
   // ログイン処理
   const handleLogin = async () => {
     try {
+      // Firebaseが初期化されているか確認
+      if (!auth || !googleProvider) {
+        alert('Firebaseが初期化されていません。環境変数が正しく設定されているか確認してください。\n\nブラウザのコンソール（F12キー）で詳細を確認してください。')
+        console.error('Firebase Auth is not initialized. Check environment variables.')
+        return
+      }
+      
       await signInWithGoogle()
       // Firebase認証は完了しましたが、Google Calendar API用のアクセストークンは別途取得が必要です
       // ユーザーが「Googleカレンダーからタスクを取得」ボタンを押したときに取得します
       console.log('Firebase login successful. Google Calendar access token will be obtained when user clicks the button.')
     } catch (error: any) {
       console.error('Login failed:', error)
-      alert('ログインに失敗しました。もう一度お試しください。')
+      
+      // エラーの種類に応じて詳細なメッセージを表示
+      let errorMessage = 'ログインに失敗しました。'
+      
+      if (error.code === 'auth/popup-closed-by-user') {
+        errorMessage = 'ログインがキャンセルされました。再度お試しください。'
+      } else if (error.code === 'auth/unauthorized-domain') {
+        errorMessage = 'このドメインは認証されていません。Firebase Consoleで承認済みドメインに追加してください。'
+      } else if (error.code === 'auth/popup-blocked') {
+        // リダイレクト方式に自動フォールバックするため、エラーを表示しない
+        console.log('Popup blocked, redirecting to Google sign-in...')
+        return
+      } else if (error.message?.includes('Firebase Auth is not initialized')) {
+        errorMessage = 'Firebaseが初期化されていません。環境変数が正しく設定されているか確認してください。'
+      } else if (error.message) {
+        errorMessage = `ログインに失敗しました: ${error.message}`
+      }
+      
+      alert(errorMessage + '\n\nブラウザのコンソール（F12キー）で詳細を確認してください。')
     }
   }
   
@@ -1857,12 +1964,320 @@ ${currentGoals.quadrant2.map((goal, idx) => {
 
         {/* メインコンテンツ：タスク一覧とタイムライン */}
         <div className="main-content">
-          {/* タスク一覧 */}
+          {/* タスク一覧（時間軸表示） */}
           <div className="tasks-section">
-            <h2>タスク一覧</h2>
+            <div className="tasks-header">
+              <h2>タスク一覧</h2>
+              <button 
+                onClick={async () => {
+                  const tasks = tasksByDate[getDateKey(selectedDate)] || []
+                  if (tasks.length === 0) {
+                    alert('クリアするタスクがありません。')
+                    return
+                  }
+                  if (window.confirm('選択した日付のタスク一覧をすべてクリアしますか？')) {
+                    const selectedDateKey = getDateKey(selectedDate)
+                    setTasksByDate(prevTasksByDate => {
+                      const updated = { ...prevTasksByDate }
+                      updated[selectedDateKey] = []
+                      return updated
+                    })
+                    setTasks([])
+                    
+                    // 実行中のタスクがある場合は停止
+                    if (activeTaskId) {
+                      setActiveTaskId(null)
+                      startTimeRef.current = null
+                    }
+                    
+                    // Firestoreに保存
+                    if (user) {
+                      try {
+                        const todayKey = getDateKey(new Date())
+                        const updatedTasksByDate = { ...tasksByDate }
+                        updatedTasksByDate[selectedDateKey] = []
+                        await saveUserData(user.uid, {
+                          tasks: [],
+                          tasksByDate: updatedTasksByDate,
+                          goalsByDate,
+                          tasksDate: todayKey
+                        })
+                      } catch (error) {
+                        console.error('タスク一覧のクリア保存に失敗:', error)
+                      }
+                    }
+                  }
+                }}
+                className="tasks-clear-button"
+              >
+                クリア
+              </button>
+            </div>
+            
+            {(() => {
+              const tasks = tasksByDate[getDateKey(selectedDate)] || []
+              const selectedDateStart = new Date(selectedDate)
+              selectedDateStart.setHours(0, 0, 0, 0)
+              
+              // 表示する時間範囲を決定（7時から22時）
+              const minHour = 7
+              const maxHour = 22
+              const hours: number[] = []
+              for (let h = minHour; h <= maxHour; h++) {
+                hours.push(h)
+              }
+              
+              // 予定タスクを収集（重複を防ぐためにMapを使用）
+              const scheduledTasksMap = new Map<string, {
+                taskId: string
+                taskName: string
+                taskColor: string
+                start: number
+                end: number
+                estimatedTime: number
+              }>()
+              
+              tasks.forEach(task => {
+                if (task.estimatedTime && task.scheduledStart && task.scheduledEnd) {
+                  // Google Calendarから取得した予定時間を使用
+                  // 選択した日付の範囲に合わせる
+                  const taskStartDate = new Date(task.scheduledStart)
+                  const taskStartHour = taskStartDate.getHours()
+                  
+                  // 選択した日付とタスクの日付が一致するか確認
+                  // タイムゾーンの問題を避けるため、ローカルタイムで日付を比較
+                  const taskDateKey = getDateKey(taskStartDate)
+                  const selectedDateKey = getDateKey(selectedDate)
+                  
+                  
+                  if (taskDateKey === selectedDateKey) {
+                    // 重複を防ぐためにtaskIdをキーとして使用
+                    if (!scheduledTasksMap.has(task.id)) {
+                      scheduledTasksMap.set(task.id, {
+                        taskId: task.id,
+                        taskName: task.name,
+                        taskColor: task.color,
+                        start: task.scheduledStart,
+                        end: task.scheduledEnd,
+                        estimatedTime: task.estimatedTime
+                      })
+                    }
+                  }
+                } else if (task.estimatedTime) {
+                  // estimatedTimeはあるが、scheduledStart/scheduledEndがない場合（後方互換性）
+                  // タスクの最初のセッションの開始時間を使用、なければ9:00をデフォルト
+                  const firstSession = task.sessions.find(s => s.start)
+                  const startHour = firstSession ? new Date(firstSession.start).getHours() : 9
+                  const startMinute = firstSession ? new Date(firstSession.start).getMinutes() : 0
+                  const scheduledStart = new Date(selectedDate)
+                  scheduledStart.setHours(startHour, startMinute, 0, 0)
+                  const scheduledEnd = new Date(scheduledStart.getTime() + task.estimatedTime)
+                  
+                  // 重複を防ぐためにtaskIdをキーとして使用
+                  if (!scheduledTasksMap.has(task.id)) {
+                    scheduledTasksMap.set(task.id, {
+                      taskId: task.id,
+                      taskName: task.name,
+                      taskColor: task.color,
+                      start: scheduledStart.getTime(),
+                      end: scheduledEnd.getTime(),
+                      estimatedTime: task.estimatedTime
+                    })
+                  }
+                }
+              })
+              
+              const scheduledTasks = Array.from(scheduledTasksMap.values())
+              
+              // カレンダーからのタスク（scheduledStartがあるタスク）がない場合は時間軸を表示しない
+              if (scheduledTasks.length === 0) {
+                return null
+              }
+              
+              // グローバルにカラムを割り当てる（すべてのタスクに対して）
+              // タスクを開始時間でソート
+              const allTasksSorted = [...scheduledTasks].sort((a, b) => a.start - b.start)
+              
+              // 3カラム固定で表示
+              const columnCount = 3
+              
+              // 時間的な重複を考慮してカラムを割り当てる
+              const globalColumnAssignments = new Map<string, number>() // taskId -> columnIndex
+              const columnTasks: Array<Array<typeof allTasksSorted[0]>> = [[], [], []] // 各カラムのタスク
+              
+              for (const task of allTasksSorted) {
+                let assignedColumn = -1
+                
+                // 各カラムを順番にチェック（0=1カラム目、1=2カラム目、2=3カラム目）
+                for (let colIdx = 0; colIdx < 3; colIdx++) {
+                  const tasksInColumn = columnTasks[colIdx]
+                  let hasOverlap = false
+                  
+                  // このカラム内のすべてのタスクと重複をチェック
+                  for (const existingTask of tasksInColumn) {
+                    if (task.start < existingTask.end && task.end > existingTask.start) {
+                      hasOverlap = true
+                      break
+                    }
+                  }
+                  
+                  if (!hasOverlap) {
+                    assignedColumn = colIdx
+                    tasksInColumn.push(task)
+                    break
+                  }
+                }
+                
+                // すべてのカラムで重複している場合、1カラム目に強制的に配置
+                if (assignedColumn === -1) {
+                  assignedColumn = 0
+                  columnTasks[0].push(task)
+                }
+                
+                globalColumnAssignments.set(task.taskId, assignedColumn)
+              }
+              
+              return (
+                <div className="schedule-timeline">
+                  {hours.map(hour => {
+                    // この時間帯の開始・終了時刻を計算
+                    const hourStart = new Date(selectedDate)
+                    hourStart.setHours(hour, 0, 0, 0)
+                    const hourStartTime = hourStart.getTime()
+                    
+                    // この時間帯に関連するタスクをフィルタリング
+                    // タスクの開始時間がこの時間帯内にあるタスクのみを表示
+                    const relevantTasks = scheduledTasks.filter(task => {
+                      const taskStartDate = new Date(task.start)
+                      const taskDateKey = getDateKey(taskStartDate)
+                      const selectedDateKey = getDateKey(selectedDate)
+                      if (taskDateKey !== selectedDateKey) {
+                        return false
+                      }
+                      
+                      const taskStartHour = taskStartDate.getHours()
+                      return taskStartHour === hour
+                    })
+                    
+                    // タスクを開始時間でソート
+                    const sortedTasks = [...relevantTasks].sort((a, b) => a.start - b.start)
+                    
+                    return (
+                      <div key={hour} className="schedule-time-slot">
+                        <div className="schedule-time-label">
+                          {hour}時
+                        </div>
+                        <div className="schedule-time-line"></div>
+                        <div 
+                          className="schedule-tasks-container"
+                          style={{ 
+                            position: 'relative'
+                          }}
+                        >
+                          {/* 15分、30分、45分のグリッドライン */}
+                          <div className="grid-line grid-line-15"></div>
+                          <div className="grid-line grid-line-30"></div>
+                          <div className="grid-line grid-line-45"></div>
+                          {sortedTasks.map((task, taskIdx) => {
+                            const taskStartTime = task.start
+                            const taskEndTime = task.end
+                            
+                            // グローバルに割り当てられたカラムを取得
+                            const columnIndex = globalColumnAssignments.get(task.taskId) || 0
+                            
+                            // タスクの開始位置を計算（この時間帯内での分単位）
+                            const taskStartInSlot = (taskStartTime - hourStartTime) / (1000 * 60) // 分単位
+                            
+                            // この時間帯内での開始位置（0-60分の範囲）
+                            const validStartInSlot = Math.max(0, Math.min(60, taskStartInSlot))
+                            
+                            // タスクの全期間を表示（複数の時間帯にまたがる場合も1つのブロックで表示）
+                            const taskDurationMinutes = (taskEndTime - taskStartTime) / (1000 * 60) // 分単位
+                            
+                            // タスクの高さ（60分を超える場合も許容）
+                            const heightInSlot = taskDurationMinutes
+                            
+                            // カラム位置を計算（最大3カラムで横に並べる）
+                            const gapPercent = 1.5 // カラム間のgap（%）
+                            const slotWidth = 100 // 時間帯の幅（%）
+                            const totalGapWidth = gapPercent * (columnCount - 1)
+                            const taskWidthPercent = (slotWidth - totalGapWidth) / columnCount
+                            // カラム間のgapを考慮して左側のオフセットを計算
+                            const leftOffsetPercent = columnIndex * (taskWidthPercent + gapPercent)
+                            
+                            // topを計算（この時間帯内での開始位置を60分に対する割合で）
+                            // marginTopのパーセントは親要素の「幅」に対して計算されるため、topを使用
+                            const topPercent = (validStartInSlot / 60) * 100
+                            const heightPercent = (heightInSlot / 60) * 100
+                            
+                            const isActive = activeTaskId === task.taskId
+                            
+                            return (
+                              <div
+                                key={`${task.taskId}-${hour}-${taskIdx}`}
+                                className={`schedule-task-block scheduled ${isActive ? 'active' : ''}`}
+                                style={{
+                                  borderLeftColor: task.taskColor,
+                                  left: `${leftOffsetPercent}%`,
+                                  width: `${taskWidthPercent}%`,
+                                  top: `${topPercent}%`,
+                                  height: `${heightPercent}%`,
+                                  minHeight: '40px'
+                                }}
+                                onClick={() => handleTaskToggle(task.taskId)}
+                              >
+                                <div className="schedule-task-content">
+                                  <div className="schedule-task-time">
+                                    {formatDateTime(taskStartTime)} ～ {formatDateTime(taskEndTime)}
+                                  </div>
+                                  <div className="schedule-task-name">{task.taskName}</div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {/* 30分の区切り線 */}
+                        {hour < maxHour && (
+                          <div className="schedule-half-hour-line"></div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })()}
             
             {/* タスク追加フォーム */}
             <div className="add-task-section">
+              {/* 手動追加したタスク一覧 */}
+              {(() => {
+                const currentTasks = tasksByDate[getDateKey(selectedDate)] || []
+                const manualTasks = currentTasks.filter(task => !task.scheduledStart)
+                if (manualTasks.length === 0) return null
+                return (
+                  <div className="manual-tasks-list">
+                    {manualTasks.map(task => {
+                      const isActive = activeTaskId === task.id
+                      // 実行中の場合、現在の経過時間を計算
+                      let currentDuration = task.totalTime
+                      if (isActive && startTimeRef.current) {
+                        currentDuration = task.totalTime + (Date.now() - startTimeRef.current)
+                      }
+                      return (
+                        <div
+                          key={task.id}
+                          className={`manual-task-item ${isActive ? 'active' : ''}`}
+                          style={{ borderLeftColor: task.color }}
+                          onClick={() => handleTaskToggle(task.id)}
+                        >
+                          <span className="manual-task-name">{task.name}</span>
+                          <span className="manual-task-time">{formatTime(currentDuration)}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })()}
               <div className="add-task-input-row">
                 <input
                   type="text"
@@ -1888,80 +2303,6 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 ))}
               </div>
             </div>
-            {tasks.length === 0 ? (
-              <p className="no-tasks">タスクがありません。上記から追加してください。</p>
-            ) : (
-              <div className="task-list">
-                {tasks
-                  .sort((a, b) => a.order - b.order)
-                  .map(task => {
-                  const isActive = activeTaskId === task.id
-                  const selectedDateStart = new Date(selectedDate)
-                  selectedDateStart.setHours(0, 0, 0, 0)
-                  const selectedDateEnd = new Date(selectedDate)
-                  selectedDateEnd.setHours(23, 59, 59, 999)
-                  const selectedDateStartTime = selectedDateStart.getTime()
-                  const selectedDateEndTime = selectedDateEnd.getTime()
-                  
-                  // 選択した日付のセッションを取得
-                  const dateSessions = task.sessions.filter(session => {
-                    if (session.end) {
-                      return session.end >= selectedDateStartTime && session.start <= selectedDateEndTime
-                    }
-                    // 実行中のセッションは今日のみ
-                    return selectedDate.toDateString() === new Date().toDateString() && 
-                           session.start >= selectedDateStartTime && 
-                           activeTaskId === task.id
-                  })
-
-                  // 選択した日付の合計時間を計算
-                  const dateTime = dateSessions.reduce((sum, session) => {
-                    if (session.end) {
-                      const sessionStart = Math.max(session.start, selectedDateStartTime)
-                      const sessionEnd = Math.min(session.end, selectedDateEndTime)
-                      if (sessionStart < sessionEnd) {
-                        return sum + (sessionEnd - sessionStart)
-                      }
-                    } else if (activeTaskId === task.id && selectedDate.toDateString() === new Date().toDateString()) {
-                      const sessionStart = session.start
-                      const sessionEnd = Date.now()
-                      return sum + (sessionEnd - sessionStart)
-                    }
-                    return sum
-                  }, 0)
-
-                  return (
-                    <div
-                      key={task.id}
-                      className={`task-item ${isActive ? 'active' : ''}`}
-                      style={{ borderLeftColor: task.color }}
-                      draggable
-                      onDragStart={() => handleDragStart(task.id)}
-                      onDragOver={handleDragOver}
-                      onDrop={() => handleDrop(task.id)}
-                      onClick={() => handleTaskToggle(task.id)}
-                    >
-                      <button
-                        onClick={(e) => handleDeleteTask(task.id, e)}
-                        className="task-delete-button"
-                        title="タスクを削除"
-                      >
-                        ×
-                      </button>
-                      <div className="task-name">{task.name}</div>
-                      {dateTime > 0 && (
-                        <div className="task-time">
-                          {selectedDate.toDateString() === new Date().toDateString() ? '本日' : getDateString(selectedDate)}: {formatTime(dateTime)}
-                        </div>
-                      )}
-                      <div className="task-status">
-                        {isActive ? '⏸ 停止' : '▶ 開始'}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
             
             {/* Googleカレンダー連携 */}
             <div className="calendar-section">
@@ -2057,7 +2398,7 @@ ${currentGoals.quadrant2.map((goal, idx) => {
             </div>
           </div>
 
-          {/* 実行時間カラム（時間軸） */}
+          {/* 実行時間カラム（実績時間） */}
           <div className="timeline-section">
             <div className="timeline-header">
               <h2>実行時間</h2>
@@ -2065,93 +2406,209 @@ ${currentGoals.quadrant2.map((goal, idx) => {
                 クリア
               </button>
             </div>
-            {tasks.length === 0 ? (
-              <p className="no-tasks">タスクがありません。</p>
-            ) : (
-              (() => {
-                const allSessions = getSelectedDateData()
-                
-                if (allSessions.length === 0) {
-                  return <p className="no-tasks">{getDateString(selectedDate)}の実行記録はありません。</p>
-                }
-                
-                return (
-                  <div className="timeline">
-                    {allSessions.map((session, idx) => {
-                      const duration = session.end - session.start
-                      const isEditing = editingSession?.taskId === session.taskId && editingSession?.sessionIndex === session.sessionIndex
-                      
-                      return (
-                        <div 
-                          key={`${session.taskId}-${session.sessionIndex}-${idx}`} 
-                          className={`timeline-item ${session.isActive ? 'active' : ''}`}
-                          style={{ borderLeftColor: session.taskColor }}
-                        >
-                          {isEditing ? (
-                            <div className="timeline-edit-form">
-                              <div className="timeline-edit-inputs">
-                                <div className="timeline-edit-input-group">
-                                  <label>開始時刻</label>
-                                  <input
-                                    type="time"
-                                    value={editStartTime}
-                                    onChange={(e) => setEditStartTime(e.target.value)}
-                                    className="timeline-edit-input"
-                                  />
-                                </div>
-                                <div className="timeline-edit-input-group">
-                                  <label>終了時刻</label>
-                                  <input
-                                    type="time"
-                                    value={editEndTime}
-                                    onChange={(e) => setEditEndTime(e.target.value)}
-                                    className="timeline-edit-input"
-                                  />
-                                </div>
-                              </div>
-                              <div className="timeline-edit-actions">
-                                <button onClick={handleSaveEditSession} className="timeline-edit-save">保存</button>
-                                <button onClick={handleCancelEditSession} className="timeline-edit-cancel">キャンセル</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              {!session.isActive && (
-                                <button
-                                  onClick={(e) => handleDeleteSession(session.taskId, session.sessionIndex, e)}
-                                  className="timeline-delete-button"
-                                  title="削除"
-                                >
-                                  ×
-                                </button>
-                              )}
-                              <div 
-                                className="timeline-content"
-                                onClick={!session.isActive ? () => handleStartEditSession(session.taskId, session.sessionIndex, session.start, session.end, new MouseEvent('click')) : undefined}
-                                style={{ cursor: !session.isActive ? 'pointer' : 'default' }}
+            {(() => {
+              const allSessions = getSelectedDateData()
+              const sortedSessions = [...allSessions].sort((a, b) => a.start - b.start)
+              
+              // 表示する時間範囲を決定（7時から22時）
+              const minHour = 7
+              const maxHour = 22
+              const executionHours: number[] = []
+              for (let h = minHour; h <= maxHour; h++) {
+                executionHours.push(h)
+              }
+              
+              return (
+                <div className="schedule-timeline">
+                  {executionHours.map(hour => {
+                    const sessionsInHour = sortedSessions.filter(session => {
+                      const sessionStartHour = new Date(session.start).getHours()
+                      return sessionStartHour === hour
+                    })
+                    
+                    return (
+                      <div key={hour} className="schedule-time-slot">
+                        <div className="schedule-time-label">{hour}時</div>
+                        <div className="schedule-tasks-container execution-container">
+                          {/* 15分、30分、45分のグリッドライン */}
+                          <div className="grid-line grid-line-15"></div>
+                          <div className="grid-line grid-line-30"></div>
+                          <div className="grid-line grid-line-45"></div>
+                          {sessionsInHour.map((session, idx) => {
+                            const duration = session.end - session.start
+                            const durationMinutes = duration / (1000 * 60)
+                            const sessionStartDate = new Date(session.start)
+                            const startMinute = sessionStartDate.getMinutes()
+                            const topPercent = (startMinute / 60) * 100
+                            const heightPercent = Math.max((durationMinutes / 60) * 100, 25) // 最小25%
+                            
+                            return (
+                              <div
+                                key={`${session.taskId}-${session.sessionIndex}-${idx}`}
+                                className={`execution-item ${session.isActive ? 'active' : ''}`}
+                                style={{ 
+                                  borderLeftColor: session.taskColor,
+                                  position: 'absolute',
+                                  top: `${topPercent}%`,
+                                  left: 0,
+                                  right: 0,
+                                  height: `${heightPercent}%`,
+                                  minHeight: '40px',
+                                  zIndex: 1,
+                                }}
                               >
-                                <div className="timeline-time">
+                                <span className="execution-time">
                                   {formatDateTime(session.start)} ～ {formatDateTime(session.end)}
-                                  {session.isActive && ' [実行中]'}
-                                </div>
-                                <div className="timeline-task-name">{session.taskName}</div>
-                                <div className="timeline-duration">{formatTime(duration)}</div>
+                                </span>
+                                <span className="execution-name">{session.taskName}</span>
+                                <span className="execution-duration">{formatTime(duration)}</span>
                               </div>
-                            </>
-                          )}
+                            )
+                          })}
                         </div>
-                      )
-                    })}
-                    {/* 実績時間をクリップボードにコピー */}
+                      </div>
+                    )
+                  })}
+                  {/* 実績時間をクリップボードにコピー */}
                     <div className="timeline-copy-section">
                       <button onClick={handleCopyReport} className="report-button">
                         実績をクリップボードにコピー
                       </button>
+                      {/* 円グラフで実績時間を表示 */}
+                      {(() => {
+                        // 選択された日付の各タスクの実績時間を集計
+                        const selectedDateStart = new Date(selectedDate)
+                        selectedDateStart.setHours(0, 0, 0, 0)
+                        const selectedDateEnd = new Date(selectedDate)
+                        selectedDateEnd.setHours(23, 59, 59, 999)
+                        const selectedDateStartTime = selectedDateStart.getTime()
+                        const selectedDateEndTime = selectedDateEnd.getTime()
+                        
+                        const taskTimes: Array<{ name: string; time: number; color: string }> = []
+                        const currentTasks = tasksByDate[getDateKey(selectedDate)] || []
+                        
+                        currentTasks.forEach(task => {
+                          const dateSessions = task.sessions.filter(session => {
+                            if (session.end) {
+                              return session.end >= selectedDateStartTime && session.start <= selectedDateEndTime
+                            }
+                            return selectedDate.toDateString() === new Date().toDateString() && 
+                                   session.start >= selectedDateStartTime && 
+                                   activeTaskId === task.id
+                          })
+                          
+                          const dateTime = dateSessions.reduce((sum, session) => {
+                            if (session.end) {
+                              const sessionStart = Math.max(session.start, selectedDateStartTime)
+                              const sessionEnd = Math.min(session.end, selectedDateEndTime)
+                              if (sessionStart < sessionEnd) {
+                                return sum + (sessionEnd - sessionStart)
+                              }
+                            } else if (activeTaskId === task.id && selectedDate.toDateString() === new Date().toDateString()) {
+                              const sessionStart = session.start
+                              const sessionEnd = Date.now()
+                              return sum + (sessionEnd - sessionStart)
+                            }
+                            return sum
+                          }, 0)
+                          
+                          if (dateTime > 0) {
+                            taskTimes.push({
+                              name: task.name,
+                              time: dateTime,
+                              color: task.color
+                            })
+                          }
+                        })
+                        
+                        if (taskTimes.length === 0) {
+                          return null
+                        }
+                        
+                        const totalTime = taskTimes.reduce((sum, item) => sum + item.time, 0)
+                        if (totalTime === 0) {
+                          return null
+                        }
+                        
+                        // 円グラフを描画
+                        const radius = 100
+                        const centerX = 150
+                        const centerY = 150
+                        let currentAngle = -90 // 開始角度（上から）
+                        
+                        const paths = taskTimes.map((item) => {
+                          const percentage = (item.time / totalTime) * 100
+                          const angle = (item.time / totalTime) * 360
+                          const startAngle = currentAngle
+                          const endAngle = currentAngle + angle
+                          
+                          const startAngleRad = (startAngle * Math.PI) / 180
+                          const endAngleRad = (endAngle * Math.PI) / 180
+                          
+                          const x1 = centerX + radius * Math.cos(startAngleRad)
+                          const y1 = centerY + radius * Math.sin(startAngleRad)
+                          const x2 = centerX + radius * Math.cos(endAngleRad)
+                          const y2 = centerY + radius * Math.sin(endAngleRad)
+                          
+                          const largeArcFlag = angle > 180 ? 1 : 0
+                          
+                          const pathData = [
+                            `M ${centerX} ${centerY}`,
+                            `L ${x1} ${y1}`,
+                            `A ${radius} ${radius} 0 ${largeArcFlag} 1 ${x2} ${y2}`,
+                            'Z'
+                          ].join(' ')
+                          
+                          currentAngle = endAngle
+                          
+                          return {
+                            path: pathData,
+                            color: item.color,
+                            name: item.name,
+                            time: item.time,
+                            percentage: percentage
+                          }
+                        })
+                        
+                        return (
+                          <div className="pie-chart-section">
+                            <h3>実績時間の内訳</h3>
+                            <div className="pie-chart-container">
+                              <svg width="300" height="300" viewBox="0 0 300 300" className="pie-chart-svg">
+                                {paths.map((item) => (
+                                  <path
+                                    key={item.name}
+                                    d={item.path}
+                                    fill={item.color}
+                                    stroke="#fff"
+                                    strokeWidth="2"
+                                  />
+                                ))}
+                              </svg>
+                              <div className="pie-chart-legend">
+                                {paths.map((item) => (
+                                  <div key={item.name} className="pie-chart-legend-item">
+                                    <div 
+                                      className="pie-chart-legend-color" 
+                                      style={{ backgroundColor: item.color }}
+                                    />
+                                    <div className="pie-chart-legend-text">
+                                      <div className="pie-chart-legend-name">{item.name}</div>
+                                      <div className="pie-chart-legend-time">
+                                        {formatTime(item.time)} ({item.percentage.toFixed(1)}%)
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                 )
-              })()
-            )}
+              })()}
           </div>
         </div>
       </div>

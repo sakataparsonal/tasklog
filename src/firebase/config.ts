@@ -37,13 +37,18 @@ let googleProvider: GoogleAuthProvider | null = null
 try {
   // Firebaseアプリの初期化
   if (missingVars.length === 0) {
+    console.log('✅ Firebase環境変数が正しく設定されています')
     app = initializeApp(firebaseConfig)
     db = getFirestore(app)
     auth = getAuth(app)
     googleProvider = new GoogleAuthProvider()
+    console.log('✅ Firebaseが初期化されました')
+  } else {
+    console.error('❌ Firebase環境変数が不足しています:', missingVars)
+    console.error('Firebase機能は動作しません。必要な環境変数を設定してください。')
   }
 } catch (error) {
-  console.error('Failed to initialize Firebase:', error)
+  console.error('❌ Firebaseの初期化に失敗しました:', error)
 }
 
 // Firestoreデータベース

@@ -1,5 +1,7 @@
 import { 
-  signInWithPopup, 
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User,
@@ -8,6 +10,7 @@ import {
 import { auth, googleProvider } from './config'
 
 // Googleでログイン（Google Calendarスコープを含む）
+// まずポップアップ方式を試し、失敗した場合はリダイレクト方式にフォールバック
 export const signInWithGoogle = async (): Promise<{ user: User; accessToken: string | null }> => {
   if (!auth || !googleProvider) {
     throw new Error('Firebase Auth is not initialized')
@@ -17,21 +20,73 @@ export const signInWithGoogle = async (): Promise<{ user: User; accessToken: str
     // Google Calendar APIへのアクセス権限を要求
     googleProvider.addScope('https://www.googleapis.com/auth/calendar.readonly')
     
-    const result = await signInWithPopup(auth, googleProvider)
-    
-    // Firebase認証の認証情報からアクセストークンを取得
-    // 注意: このアクセストークンはFirebase認証用であり、Google Calendar API用のスコープを含んでいない可能性があります
-    // Google Calendar API用のアクセストークンは、別途OAuth 2.0フローで取得する必要があります
-    const credential = GoogleAuthProvider.credentialFromResult(result)
-    const accessToken = credential?.accessToken || null
-    
-    // Firebase認証用のアクセストークンは、Google Calendar API用のスコープを含んでいないため、保存しない
-    // Google Calendar API用のアクセストークンは、ユーザーが明示的に「Googleカレンダーからタスクを取得」ボタンを押したときに取得します
-    console.log('Firebase authentication successful. Google Calendar access token will be obtained separately when needed.')
-    
-    return { user: result.user, accessToken: null }
+    // まずポップアップ方式を試す（Cursorブラウザなどで動作する可能性がある）
+    console.log('ポップアップ方式でログインを試みます...')
+    try {
+      const result = await signInWithPopup(auth, googleProvider)
+      const credential = GoogleAuthProvider.credentialFromResult(result)
+      console.log('✅ ポップアップ方式でログインに成功しました:', result.user.email)
+      return { user: result.user, accessToken: null }
+    } catch (popupError: any) {
+      console.warn('ポップアップ方式が失敗しました:', popupError.code, popupError.message)
+      
+      // ポップアップがブロックされた場合、またはユーザーが閉じた場合、リダイレクト方式にフォールバック
+      if (popupError.code === 'auth/popup-blocked' || 
+          popupError.code === 'auth/popup-closed-by-user' ||
+          popupError.code === 'auth/cancelled-popup-request') {
+        console.log('リダイレクト方式にフォールバックします...')
+        try {
+          await signInWithRedirect(auth, googleProvider)
+          // リダイレクトされるため、ここには到達しない
+          return new Promise(() => {}) as never
+        } catch (redirectError: any) {
+          console.error('リダイレクト方式も失敗しました:', redirectError)
+          throw redirectError
+        }
+      }
+      // その他のエラーはそのままスロー
+      throw popupError
+    }
   } catch (error: any) {
-    console.error('Failed to sign in with Google:', error)
+    console.error('Google sign-in failed:', error)
+    throw error
+  }
+}
+
+// リダイレクト後の認証結果を取得
+export const getGoogleSignInRedirectResult = async (): Promise<{ user: User; accessToken: string | null } | null> => {
+  if (!auth || !googleProvider) {
+    console.warn('⚠️ Firebase Auth または Google Provider が初期化されていません')
+    return null
+  }
+
+  try {
+    console.log('🔍 リダイレクト結果を確認中...')
+    const result = await getRedirectResult(auth)
+    if (result) {
+      const credential = GoogleAuthProvider.credentialFromResult(result)
+      const accessToken = credential?.accessToken || null
+      console.log('✅ Firebase認証がリダイレクト経由で成功しました:', result.user.email)
+      console.log('✅ Google Calendar アクセストークンは別途取得が必要です')
+      return { user: result.user, accessToken: null }
+    } else {
+      console.log('ℹ️ リダイレクト結果はありません（通常のページ読み込みまたは既に認証済み）')
+      return null
+    }
+  } catch (error: any) {
+    console.error('❌ リダイレクト結果の取得に失敗しました:', error)
+    console.error('エラーコード:', error.code)
+    console.error('エラーメッセージ:', error.message)
+    
+    // エラーが発生した場合でも、認証状態はonAuthStateChangeで監視されるため、
+    // エラーをスローせずにnullを返す
+    if (error.code === 'auth/account-exists-with-different-credential') {
+      console.error('このメールアドレスは別の認証方法で既に登録されています')
+    } else if (error.code === 'auth/invalid-credential') {
+      console.error('認証情報が無効です')
+    }
+    
+    // エラーをスローして、呼び出し元で処理できるようにする
     throw error
   }
 }
